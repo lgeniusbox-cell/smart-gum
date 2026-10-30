@@ -1,0 +1,108 @@
+/* ==========================================================================
+   ANIMATIONS - MATPAD TV
+   Strict Low-End TV Optimization: Transform & Opacity ONLY
+   Hardware-Composited. Zero Layout Thrashing. Lite-mode overrides.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Keyframe Definitions
+   -------------------------------------------------------------------------- */
+
+@keyframes bootPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.95;
+  }
+  50% {
+    transform: scale(1.03);
+    opacity: 1;
+  }
+}
+
+@keyframes bootProgress {
+  0% {
+    transform: translate3d(-100%, 0, 0);
+  }
+  50% {
+    transform: translate3d(50%, 0, 0);
+  }
+  100% {
+    transform: translate3d(250%, 0, 0);
+  }
+}
+
+@keyframes shakeError {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+  }
+  20%, 60% {
+    transform: translate3d(-12px, 0, 0);
+  }
+  40%, 80% {
+    transform: translate3d(12px, 0, 0);
+  }
+}
+
+@keyframes successPulse {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.06);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes itemEntrance {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 24px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Utility Classes for Dynamic Triggering
+   -------------------------------------------------------------------------- */
+.anim-shake {
+  animation: shakeError 400ms var(--ease-spring) both !important;
+}
+
+.anim-pulse {
+  animation: successPulse 450ms var(--ease-spring) both !important;
+}
+
+.anim-stagger-1 { animation: itemEntrance 320ms var(--ease-out) 60ms both; }
+.anim-stagger-2 { animation: itemEntrance 320ms var(--ease-out) 120ms both; }
+.anim-stagger-3 { animation: itemEntrance 320ms var(--ease-out) 180ms both; }
+.anim-stagger-4 { animation: itemEntrance 320ms var(--ease-out) 240ms both; }
+
+/* --------------------------------------------------------------------------
+   Lite Mode / Low-End Hardware Overrides
+   Applied automatically by Performance Governor or user setting
+   -------------------------------------------------------------------------- */
+.lite-mode *,
+.lite-mode *::before,
+.lite-mode *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.08s !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.lite-mode #focus-ring {
+  box-shadow: none !important;
+  border-width: 3px !important;
+  transition: transform 60ms linear, width 60ms linear, height 60ms linear !important;
+}
+
+.lite-mode .catalog-card-poster,
+.lite-mode .dash-card-bg-art {
+  transition: none !important;
+}

@@ -1,0 +1,123 @@
+/* ==========================================================================
+   BASE & TV OVERSCAN STYLES - MATPAD TV
+   Targeting 1080p (1920x1080) & 720p (1280x720) with 5% overscan margins
+   Zero external dependencies. Hardware accelerated compositing.
+   ========================================================================== */
+
+:root {
+  /* Safe-area / TV overscan margins (5% standard) */
+  --tv-safe-x: 4.5vw;
+  --tv-safe-y: 4.5vh;
+
+  /* App dimensions */
+  --app-width: 100vw;
+  --app-height: 100vh;
+
+  /* Typography scale */
+  --font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-family-mono: 'JetBrains Mono', Consolas, monospace;
+
+  /* Dynamic font sizes tuned for 10-foot TV viewing */
+  --text-xs: clamp(0.7rem, 0.75vw, 0.9rem);
+  --text-sm: clamp(0.85rem, 0.95vw, 1.1rem);
+  --text-base: clamp(1rem, 1.15vw, 1.35rem);
+  --text-lg: clamp(1.2rem, 1.4vw, 1.65rem);
+  --text-xl: clamp(1.5rem, 1.8vw, 2.1rem);
+  --text-2xl: clamp(1.8rem, 2.3vw, 2.7rem);
+  --text-3xl: clamp(2.2rem, 3vw, 3.6rem);
+  --text-hero: clamp(2.8rem, 4vw, 4.8rem);
+
+  /* Shared timing functions */
+  --ease-spring: cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  --ease-smooth: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-focus: 220ms;
+  --duration-screen: 320ms;
+
+  /* Z-Index architecture */
+  --z-bg: 0;
+  --z-screen: 10;
+  --z-focus-ring: 50;
+  --z-header: 100;
+  --z-hints: 100;
+  --z-modal: 500;
+  --z-keyboard: 600;
+  --z-toast: 900;
+  --z-debug: 1000;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: #05070c;
+  color: #ffffff;
+  font-family: var(--font-family);
+  font-size: 16px;
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  cursor: default;
+}
+
+/* Remove default focus indicators: we use the unified gliding focus ring */
+:focus {
+  outline: none !important;
+}
+
+/* Container encompassing TV safe viewport */
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: transparent;
+}
+
+/* Background canvas container */
+#bg-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: var(--z-bg);
+  pointer-events: none;
+  overflow: hidden;
+}
+
+#bg-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Screen viewport where all views mount */
+#screen-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: var(--z-screen);
+  overflow: hidden;
+  padding: var(--tv-safe-y) var(--tv-safe-x);
+}
+
+/* Scrollbar elimination */
+::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}

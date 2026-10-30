@@ -1,0 +1,6 @@
+{
+  "name": "MatPad TV",
+  "description": "High-performance Android TV companion interface for MatPad smart sports & gaming mat with D-pad & gamepad navigation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
