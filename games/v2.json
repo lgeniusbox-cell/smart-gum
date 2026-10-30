@@ -1,0 +1,19 @@
+{
+  "type": "game",
+  "source": "yt-v-interactive",
+  "url": "https://youtu.be/kJQP7kiw5Fk",
+  "banner": "https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=700&q=80",
+  "title": "Rhythm Tile Dash",
+  "genre": "Beat & Rhythm",
+  "duration": 600,
+  "keymapping": {
+    "pad_1": "BEAT_1",
+    "pad_2": "BEAT_2",
+    "pad_3": "BEAT_3",
+    "pad_4": "BEAT_4"
+  },
+  "script": {
+    "bpm": 128,
+    "streakBonus": true
+  }
+}

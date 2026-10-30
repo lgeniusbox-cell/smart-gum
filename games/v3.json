@@ -1,0 +1,17 @@
+{
+  "type": "game",
+  "source": "yt-v-interactive",
+  "url": "https://youtu.be/fJ9rUzIMcZQ",
+  "banner": "https://images.unsplash.com/photo-1538481199705-c710c4e965fc?auto=format&fit=crop&w=700&q=80",
+  "title": "Target Dodge Extreme",
+  "genre": "Precision",
+  "duration": 900,
+  "keymapping": {
+    "center": "REST",
+    "perimeter": "DEFLECT"
+  },
+  "script": {
+    "rounds": 5,
+    "speedMultiplier": 1.2
+  }
+}

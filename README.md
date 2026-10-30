@@ -205,6 +205,19 @@ Supported event types:
 ├── metadata.json                # AI Studio manifest
 ├── assets/
 │   └── logo.png                 # Official MatPad transparent logo
+├── avatars/
+│   └── avatars.json             # Avatars catalog (child & adult vector avatars)
+├── games/
+│   ├── index.txt                # Index file containing item count (e.g. 3)
+│   ├── v1.json                  # Game definition 1 (Lava Runner Reflex)
+│   ├── v2.json                  # Game definition 2 (Rhythm Tile Dash)
+│   └── v3.json                  # Game definition 3 (Target Dodge Extreme)
+├── virtual_run/
+│   ├── index.txt                # Index file containing item count (e.g. 4)
+│   ├── v1.json                  # Virtual run 1 (Peninsula Road Trail)
+│   ├── v2.json                  # Virtual run 2 (Tropical Pacific Coastline)
+│   ├── v3.json                  # Virtual run 3 (Tokyo Neon Night Sprint)
+│   └── v4.json                  # Virtual run 4 (Alpine Meadow Pass)
 ├── css/
 │   ├── base.css                 # 10-foot TV typography & 5% overscan margins
 │   ├── themes.css               # Child, Adult, and Neutral theme definitions
@@ -212,7 +225,7 @@ Supported event types:
 │   ├── screens.css              # Boot, Profile, Dashboard, Catalog layouts
 │   └── animations.css           # Composited keyframes and Lite Mode overrides
 ├── js/
-│   ├── config.js                # Configuration, endpoints, limits, i18n dictionary
+│   ├── config.js                # Configuration (relative paths for GitHub Pages), i18n
 │   ├── utils.js                 # Helpers, YouTube parsers, SVG icon library
 │   ├── storage.js               # IndexedDB wrapper with localStorage fallback
 │   ├── bridge.js                # Android WebView JS interface bridge
@@ -237,3 +250,18 @@ Supported event types:
     ├── bg-worker.js             # OffscreenCanvas particle & lighting worker
     └── data-worker.js           # Background JSON diffing and parsing worker
 ```
+
+---
+
+## 6. GitHub Pages Deployment (All-In-One Self-Contained)
+
+The repository is configured so all content files (`avatars.json`, `index.txt`, and `v1.json`... `vN.json`) resolve relative to the repository URL (`./`).
+
+To publish:
+1. Push this repository to GitHub (e.g. `https://github.com/<your-username>/<your-repo>`).
+2. Go to repository **Settings** > **Pages**.
+3. Under **Build and deployment** > **Branch**, select `main` (or `gh-pages`) and `/ (root)`. Click **Save**.
+4. GitHub Pages will deploy your site at `https://<your-username>.github.io/<your-repo>/`.
+5. Point your Android TV APK WebView to that URL or package the root directory directly into Android assets!
+   All categories (`games/`, `virtual_run/`) and avatars (`avatars/`) load directly from the same repository.
+

@@ -178,14 +178,29 @@ window.Profiles = (function () {
       return cachedAvatars;
     }
 
-    // 2. Fetch remote avatars
+    // 2. Fetch avatars from repo directory (with remote backup fallback)
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), window.CONFIG.FETCH_TIMEOUT_MS);
-      const res = await fetch(window.CONFIG.AVATARS_URL, { signal: controller.signal });
-      clearTimeout(timeoutId);
+      let res;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), window.CONFIG.FETCH_TIMEOUT_MS);
+        res = await fetch(window.CONFIG.AVATARS_URL, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch (localErr) {
+        if (window.CONFIG.REMOTE_BACKUP_BASE_URL) {
+          const backupUrl = `${window.CONFIG.REMOTE_BACKUP_BASE_URL}avatars/avatars.json`;
+          const controller2 = new AbortController();
+          const timeoutId2 = setTimeout(() => controller2.abort(), window.CONFIG.FETCH_TIMEOUT_MS);
+          res = await fetch(backupUrl, { signal: controller2.signal });
+          clearTimeout(timeoutId2);
+          if (!res.ok) throw new Error(`Backup HTTP ${res.status}`);
+        } else {
+          throw localErr;
+        }
+      }
 
-      if (res.ok) {
+      if (res && res.ok) {
         const data = await res.json();
         if (data && (Array.isArray(data.child) || Array.isArray(data.adult))) {
           cachedAvatars = {
@@ -198,7 +213,7 @@ window.Profiles = (function () {
         }
       }
     } catch (err) {
-      console.warn('[Profiles] Could not fetch remote avatars, using built-in SVGs:', err.message);
+      console.warn('[Profiles] Could not fetch avatars, using built-in SVGs:', err.message);
     }
 
     // 3. Fallback: Generate built-in SVG avatars so creation is never blocked

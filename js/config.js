@@ -6,9 +6,11 @@
  */
 
 window.CONFIG = {
-  // Remote Content & Avatars Endpoints
-  BASE_URL: 'https://raw.githubusercontent.com/lgeniusbox-cell/matpad-app/refs/heads/main/',
-  AVATARS_URL: 'https://raw.githubusercontent.com/lgeniusbox-cell/matpad-app/refs/heads/main/avatars/avatars.json',
+  // Content & Avatars Endpoints (Self-contained in this repository)
+  // When published on GitHub Pages or loaded in WebView, resolves directly from repo
+  BASE_URL: './',
+  AVATARS_URL: './avatars/avatars.json',
+  REMOTE_BACKUP_BASE_URL: 'https://raw.githubusercontent.com/lgeniusbox-cell/matpad-app/refs/heads/main/',
 
   // Category folders on GitHub raw (easily reconfigurable)
   CATEGORIES: {

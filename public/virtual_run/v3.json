@@ -1,0 +1,11 @@
+{
+  "type": "virtual_run",
+  "url": "https://youtu.be/77ZozI0rw7w",
+  "title": "Tokyo Neon Night Sprint",
+  "place": "City",
+  "duration": 1850,
+  "trim": {
+    "start": 10,
+    "end": 1850
+  }
+}

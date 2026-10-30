@@ -1,0 +1,20 @@
+{
+  "type": "game",
+  "source": "yt-v-interactive",
+  "url": "https://youtu.be/2Vv-BfVoq4g",
+  "banner": "https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&w=700&q=80",
+  "title": "Lava Runner Reflex",
+  "genre": "Agility",
+  "duration": 480,
+  "keymapping": {
+    "step_up": "JUMP",
+    "step_down": "CROUCH",
+    "step_left": "DODGE_LEFT",
+    "step_right": "DODGE_RIGHT"
+  },
+  "script": {
+    "engine": "matpad-step-v1",
+    "difficulty": "medium",
+    "scoreTarget": 1000
+  }
+}

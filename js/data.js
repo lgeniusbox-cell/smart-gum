@@ -50,19 +50,32 @@ window.Data = (function () {
     syncingCategories.add(category);
 
     const folder = window.CONFIG.CATEGORIES[category.toUpperCase()] || category;
-    const baseUrl = `${window.CONFIG.BASE_URL}${folder}/`;
-    const indexUrl = `${baseUrl}index.txt?t=${Date.now()}`;
+    let baseUrl = `${window.CONFIG.BASE_URL}${folder}/`;
+    let indexUrl = `${baseUrl}index.txt?t=${Date.now()}`;
 
     let cache = await getLocalCategoryData(category);
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), window.CONFIG.FETCH_TIMEOUT_MS);
-      const res = await fetch(indexUrl, { signal: controller.signal });
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
+      let res;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), window.CONFIG.FETCH_TIMEOUT_MS);
+        res = await fetch(indexUrl, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch (localErr) {
+        // If relative repo fetch fails, try remote backup URL if available
+        if (window.CONFIG.REMOTE_BACKUP_BASE_URL) {
+          baseUrl = `${window.CONFIG.REMOTE_BACKUP_BASE_URL}${folder}/`;
+          indexUrl = `${baseUrl}index.txt?t=${Date.now()}`;
+          const controller2 = new AbortController();
+          const timeoutId2 = setTimeout(() => controller2.abort(), window.CONFIG.FETCH_TIMEOUT_MS);
+          res = await fetch(indexUrl, { signal: controller2.signal });
+          clearTimeout(timeoutId2);
+          if (!res.ok) throw new Error(`Backup HTTP ${res.status}`);
+        } else {
+          throw localErr;
+        }
       }
 
       const rawText = await res.text();
@@ -73,7 +86,7 @@ window.Data = (function () {
         throw new Error('Invalid index integer in remote index.txt');
       }
 
-      console.log(`[Data] Category "${category}": remote N = ${remoteN}, local lastIndex = ${cache.lastIndex}`);
+      console.log(`[Data] Category "${category}": repo index N = ${remoteN}, local lastIndex = ${cache.lastIndex}`);
 
       if (remoteN < cache.lastIndex) {
         // Content was removed or reset on server
