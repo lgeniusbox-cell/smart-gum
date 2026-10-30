@@ -78,7 +78,7 @@ window.Router = (function () {
   }
 
   async function navigate(targetScreenId, params = {}, addToHistory = true) {
-    if (isTransitioning || targetScreenId === currentScreenId) return;
+    if (targetScreenId === currentScreenId) return;
     const targetHandler = screens[targetScreenId];
     if (!targetHandler) {
       console.error(`[Router] Unknown screen: ${targetScreenId}`);
@@ -89,7 +89,7 @@ window.Router = (function () {
     if (window.Focus) window.Focus.hideFocusRing();
 
     const container = document.getElementById('screen-container');
-    const oldScreenEl = container.querySelector('.screen.active');
+    const oldScreenEl = container ? container.querySelector('.screen.active') : null;
 
     // Save previous screen focus before leaving
     if (currentScreenId && addToHistory) {
@@ -105,9 +105,11 @@ window.Router = (function () {
       oldScreenEl.classList.add('exiting');
       oldScreenEl.classList.remove('active');
       if (screens[currentScreenId] && screens[currentScreenId].onLeave) {
-        screens[currentScreenId].onLeave();
+        try {
+          screens[currentScreenId].onLeave();
+        } catch (e) {}
       }
-      await new Promise(r => setTimeout(r, 220));
+      await new Promise(r => setTimeout(r, 140));
       if (oldScreenEl.parentNode) {
         oldScreenEl.parentNode.removeChild(oldScreenEl);
       }
@@ -122,20 +124,28 @@ window.Router = (function () {
     const newScreenEl = document.createElement('div');
     newScreenEl.id = `screen-${targetScreenId}`;
     newScreenEl.className = `screen screen-${targetScreenId}`;
-    container.appendChild(newScreenEl);
-
-    // Call target screen mount
-    if (targetHandler.onMount) {
-      await targetHandler.onMount(newScreenEl, params);
+    if (container) {
+      container.appendChild(newScreenEl);
     }
 
     // Trigger entrance transition
     void newScreenEl.offsetWidth;
     newScreenEl.classList.add('active');
 
-    // Give TV DOM time to composite before showing focus ring
+    // Reset transition lock so screen can trigger further navigations if needed
+    isTransitioning = false;
+
+    // Call target screen mount
+    if (targetHandler.onMount) {
+      try {
+        await targetHandler.onMount(newScreenEl, params);
+      } catch (err) {
+        console.error(`[Router] Error mounting screen ${targetScreenId}:`, err);
+      }
+    }
+
+    // Give TV & PC DOM time to composite before showing focus ring
     setTimeout(() => {
-      isTransitioning = false;
       if (window.Focus) {
         if (targetHandler.getDefaultFocus) {
           const defaultEl = targetHandler.getDefaultFocus(newScreenEl);
@@ -149,7 +159,7 @@ window.Router = (function () {
         }
         window.Focus.showFocusRing();
       }
-    }, 140);
+    }, 100);
   }
 
   function handleBack() {

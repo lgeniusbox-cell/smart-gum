@@ -81,12 +81,20 @@ window.Input = (function () {
     else if (key === 'ArrowRight' || code === 22 || code === 39) {
       action = ACTIONS.RIGHT;
     }
-    // Confirm / OK
-    else if (key === 'Enter' || code === 23 || code === 66 || code === 13) {
+    // Confirm / OK (Enter or Space when not typing)
+    else if (key === 'Enter' || key === ' ' || code === 23 || code === 66 || code === 13 || code === 32) {
+      // If virtual keyboard is open and space was pressed, let keyboard handler consume it
+      if (key === ' ' && window.VirtualKeyboard && window.VirtualKeyboard.isOpen()) {
+        return;
+      }
       action = ACTIONS.OK;
     }
+    // Tab / Shift+Tab for PC browser accessibility
+    else if (key === 'Tab' || code === 9) {
+      action = e.shiftKey ? ACTIONS.LEFT : ACTIONS.RIGHT;
+    }
     // Back / Return
-    else if (key === 'Escape' || key === 'Backspace' || code === 4 || code === 27 || code === 8 || code === 97) {
+    else if (key === 'Escape' || (key === 'Backspace' && (!window.VirtualKeyboard || !window.VirtualKeyboard.isOpen())) || code === 4 || code === 27 || code === 97) {
       action = ACTIONS.BACK;
     }
     // Menu / Settings
@@ -94,7 +102,7 @@ window.Input = (function () {
       action = ACTIONS.MENU;
     }
     // Debug toggle (key 'd' or 'D')
-    else if (key === 'd' || key === 'D') {
+    else if ((key === 'd' || key === 'D') && (!window.VirtualKeyboard || !window.VirtualKeyboard.isOpen())) {
       action = ACTIONS.DEBUG;
     }
 

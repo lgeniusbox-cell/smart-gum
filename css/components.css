@@ -204,6 +204,7 @@
    -------------------------------------------------------------------------- */
 .focusable {
   position: relative;
+  cursor: pointer;
   transition: transform var(--duration-focus) var(--focus-ease);
   will-change: transform;
 }

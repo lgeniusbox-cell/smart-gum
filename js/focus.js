@@ -23,6 +23,21 @@ window.Focus = (function () {
     window.addEventListener('resize', () => {
       if (currentElement) updateFocusRing(currentElement);
     });
+
+    // PC Browser Support: Mouse hover and click set focus smoothly
+    document.addEventListener('mouseover', (e) => {
+      const el = e.target.closest ? e.target.closest('.focusable') : null;
+      if (el && el !== currentElement && document.body.contains(el)) {
+        setFocus(el);
+      }
+    });
+
+    document.addEventListener('click', (e) => {
+      const el = e.target.closest ? e.target.closest('.focusable') : null;
+      if (el && document.body.contains(el)) {
+        setFocus(el);
+      }
+    });
   }
 
   function handleAction(action) {
