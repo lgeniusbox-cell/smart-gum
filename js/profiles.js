@@ -11,7 +11,34 @@ window.Profiles = (function () {
 
   const PROFILES_KEY = 'profiles_list';
   const AVATARS_KEY = 'avatars_cache';
-  let cachedProfiles = [];
+  const DEFAULT_PROFILES = [
+    {
+      id: 'p_child_1',
+      name: 'Leo',
+      age: 9,
+      weight: 32,
+      sex: 'male',
+      type: 'child',
+      avatar: window.Utils ? window.Utils.generateFallbackAvatarSvg('Leo', true, 0) : '',
+      pinHash: '',
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000
+    },
+    {
+      id: 'p_adult_1',
+      name: 'Sarah',
+      age: 29,
+      weight: 64,
+      sex: 'female',
+      type: 'adult',
+      avatar: window.Utils ? window.Utils.generateFallbackAvatarSvg('Sarah', false, 1) : '',
+      pinHash: '',
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000
+    }
+  ];
+
+  let cachedProfiles = [...DEFAULT_PROFILES];
   let cachedAvatars = null;
   let activeProfile = null;
 
