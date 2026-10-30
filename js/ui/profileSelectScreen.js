@@ -37,7 +37,7 @@ window.ProfileSelectScreen = (function () {
           <div class="profile-card focusable anim-stagger-${(idx % 4) + 1}" data-profile-id="${p.id}" tabindex="0">
             <div class="profile-card-glow"></div>
             <div class="profile-avatar-wrap">
-              <img src="${p.avatar}" alt="${window.Utils.escapeHTML(p.name)}" class="profile-card-avatar" onerror="this.src='${window.Utils.generateFallbackAvatarSvg(p.name, isChild, idx)}'" />
+              <img src="${p.avatar}" alt="${window.Utils.escapeHTML(p.name)}" class="profile-card-avatar" data-profile-name="${window.Utils.escapeHTML(p.name)}" data-is-child="${isChild}" data-idx="${idx}" />
               ${hasPin ? `<div class="profile-lock-icon">${window.Utils.getIcon('lock')}</div>` : ''}
             </div>
             <div class="profile-card-info">
@@ -86,6 +86,19 @@ window.ProfileSelectScreen = (function () {
   }
 
   function setupEvents(container) {
+    // Attach error fallbacks for avatars
+    container.querySelectorAll('.profile-card-avatar').forEach(img => {
+      img.onerror = function () {
+        const name = img.getAttribute('data-profile-name') || 'Player';
+        const isChild = img.getAttribute('data-is-child') === 'true';
+        const idx = parseInt(img.getAttribute('data-idx') || '0', 10);
+        img.onerror = null;
+        if (window.Utils && window.Utils.generateFallbackAvatarSvg) {
+          img.src = window.Utils.generateFallbackAvatarSvg(name, isChild, idx);
+        }
+      };
+    });
+
     // Click on Profile Card -> Select profile
     container.querySelectorAll('.profile-card[data-profile-id]').forEach(card => {
       card.addEventListener('click', () => {

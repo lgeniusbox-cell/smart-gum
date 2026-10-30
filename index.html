@@ -10,17 +10,27 @@
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
 
+    <!-- GitHub Pages Subpath Normalizer (Guarantees relative paths work on any custom repo URL) -->
+    <script>
+      (function() {
+        var path = window.location.pathname;
+        if (path.indexOf('.') === -1 && !path.endsWith('/')) {
+          window.history.replaceState(null, '', path + '/' + window.location.search + window.location.hash);
+        }
+      })();
+    </script>
+
     <!-- Google Web Fonts for Crisp 10-foot TV UI -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&family=JetBrains+Mono:wght@600;800&display=swap" rel="stylesheet">
 
     <!-- CSS Layers (Strict GPU-accelerated styling) -->
-    <link rel="stylesheet" href="css/base.css" />
-    <link rel="stylesheet" href="css/themes.css" />
-    <link rel="stylesheet" href="css/components.css" />
-    <link rel="stylesheet" href="css/screens.css" />
-    <link rel="stylesheet" href="css/animations.css" />
+    <link rel="stylesheet" href="./css/base.css" />
+    <link rel="stylesheet" href="./css/themes.css" />
+    <link rel="stylesheet" href="./css/components.css" />
+    <link rel="stylesheet" href="./css/screens.css" />
+    <link rel="stylesheet" href="./css/animations.css" />
   </head>
   <body>
     <div id="app" data-theme="neutral">
@@ -62,29 +72,39 @@
     </div>
 
     <!-- Core Script Modules (Pure Vanilla JS, zero build step required) -->
-    <script src="js/config.js"></script>
-    <script src="js/utils.js"></script>
-    <script src="js/storage.js"></script>
-    <script src="js/bridge.js"></script>
-    <script src="js/perf.js"></script>
-    <script src="js/bg.js"></script>
-    <script src="js/input.js"></script>
-    <script src="js/focus.js"></script>
-    <script src="js/notify.js"></script>
-    <script src="js/theme.js"></script>
-    <script src="js/keyboard.js"></script>
-    <script src="js/profiles.js"></script>
-    <script src="js/data.js"></script>
-    <script src="js/router.js"></script>
+    <script src="./js/config.js"></script>
+    <script src="./js/utils.js"></script>
+    <script src="./js/storage.js"></script>
+    <script src="./js/bridge.js"></script>
+    <script src="./js/perf.js"></script>
+    <script src="./js/bg.js"></script>
+    <script src="./js/input.js"></script>
+    <script src="./js/focus.js"></script>
+    <script src="./js/notify.js"></script>
+    <script src="./js/theme.js"></script>
+    <script src="./js/keyboard.js"></script>
+    <script src="./js/profiles.js"></script>
+    <script src="./js/data.js"></script>
+    <script src="./js/router.js"></script>
 
     <!-- Screen Views -->
-    <script src="js/ui/bootScreen.js"></script>
-    <script src="js/ui/profileSelectScreen.js"></script>
-    <script src="js/ui/profileEditScreen.js"></script>
-    <script src="js/ui/mainScreen.js"></script>
-    <script src="js/ui/categoryScreen.js"></script>
+    <script src="./js/ui/bootScreen.js"></script>
+    <script src="./js/ui/profileSelectScreen.js"></script>
+    <script src="./js/ui/profileEditScreen.js"></script>
+    <script src="./js/ui/mainScreen.js"></script>
+    <script src="./js/ui/categoryScreen.js"></script>
 
     <!-- App Bootstrap -->
-    <script src="js/app.js"></script>
+    <script src="./js/app.js"></script>
+
+    <!-- Global Boot Recovery Safety Net -->
+    <script>
+      setTimeout(function() {
+        if (window.Router && window.Router.getCurrentScreen() === 'boot') {
+          console.warn('[MatPad Safety Net] Forcing navigation from boot to profile_select');
+          window.Router.navigate('profile_select');
+        }
+      }, 2000);
+    </script>
   </body>
 </html>

@@ -41,19 +41,20 @@ window.BootScreen = (function () {
 
     statusTextEl = document.getElementById('boot-status');
 
-    // Fail-safe watchdog: guarantees the app advances to Profile Select within 1.6s even on slow/broken network/storage
+    // Fail-safe watchdog: guarantees the app advances to Profile Select within 900ms even on slow/broken network/storage
     watchdogTimer = setTimeout(() => {
       console.log('[BootScreen] Watchdog timer fired. Advancing to Profile Select.');
       safeTransition();
-    }, 1600);
+    }, 900);
 
     // Click/key listener to allow skipping boot if desired
     const clickHandler = () => safeTransition();
     container.addEventListener('click', clickHandler, { once: true });
+    window.addEventListener('keydown', clickHandler, { once: true });
 
     try {
       // 1. Initial visual breathing delay
-      await delay(400);
+      await delay(250);
       updateStatus(window.t('boot_syncing'));
 
       // 2. Load Profiles with timeout race (max 600ms)
