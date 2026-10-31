@@ -144,6 +144,18 @@
   fill: currentColor;
 }
 
+.dash-spotify-btn {
+  color: #1ed760;
+  transition: transform 180ms ease, color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.dash-spotify-btn:hover,
+.dash-spotify-btn.focused {
+  color: #1ed760;
+  border-color: rgba(30, 215, 96, 0.6);
+  box-shadow: 0 0 16px rgba(30, 215, 96, 0.35);
+}
+
 /* --------------------------------------------------------------------------
    On-Screen Hint Bar (Bottom TV Navigation Indicators)
    -------------------------------------------------------------------------- */

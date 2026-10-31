@@ -488,6 +488,7 @@
     S.open = true;
     S.stack = [];
     S.depth = 0;
+    if (window.Focus && window.Focus.hideFocusRing) window.Focus.hideFocusRing();
     pushHistory();
     renderStack();
   }
@@ -500,7 +501,11 @@
     S.open = false;
     S.stack = [];
     S.depth = 0;
-    try { if (lastFocus && lastFocus.focus) lastFocus.focus(); } catch (e) { /* ignore */ }
+    if (window.Focus && window.Focus.showFocusRing) window.Focus.showFocusRing();
+    try {
+      if (lastFocus && lastFocus.focus) lastFocus.focus();
+      if (window.Focus && lastFocus && window.Focus.setFocus) window.Focus.setFocus(lastFocus);
+    } catch (e) { /* ignore */ }
   }
 
   function renderStack() {
@@ -822,6 +827,19 @@
   }
 
   function placeButton() {
+    var existing = document.getElementById('dash-spotify-btn');
+    if (existing) {
+      btnEl = existing;
+      if (!existing.__spBound) {
+        existing.__spBound = true;
+        existing.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          open();
+        });
+      }
+      return true;
+    }
     if (btnEl && document.body.contains(btnEl)) return true;
     var ref = findReference();
     if (!ref || !ref.parentNode) return false;

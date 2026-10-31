@@ -29,6 +29,11 @@ window.MainScreen = (function () {
 
         <div class="top-bar-right">
           <div id="clock-widget" class="clock-display">12:00</div>
+
+          <!-- Focusable Spotify Music Button -->
+          <button type="button" class="icon-btn focusable dash-spotify-btn" id="dash-spotify-btn" tabindex="0" title="Spotify" aria-label="Spotify">
+            ${window.Utils.getIcon('spotify')}
+          </button>
           
           <!-- Focusable Profile Pill to Switch Profiles -->
           <button type="button" class="profile-chip-btn focusable" id="dash-profile-btn" tabindex="0" title="Switch Profile">
@@ -98,6 +103,18 @@ window.MainScreen = (function () {
   }
 
   function setupDashboardEvents(container) {
+    // Spotify Button -> Open Spotify Overlay
+    const spotifyBtn = container.querySelector('#dash-spotify-btn');
+    if (spotifyBtn) {
+      spotifyBtn.addEventListener('click', () => {
+        if (window.SpotifyOverlay && typeof window.SpotifyOverlay.open === 'function') {
+          window.SpotifyOverlay.open();
+        } else {
+          console.warn('[Main] SpotifyOverlay not available');
+        }
+      });
+    }
+
     // Switch Profile button
     const profileBtn = container.querySelector('#dash-profile-btn');
     if (profileBtn) {
