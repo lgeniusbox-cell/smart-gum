@@ -16,8 +16,10 @@ window.ProfileSelectScreen = (function () {
   let enteredPin = '';
   let failedAttempts = 0;
   let lockoutTimer = null;
+  let isProceeding = false;
 
   async function onMount(container) {
+    isProceeding = false;
     currentContainer = container;
 
     // Reset to neutral theme for profile select
@@ -145,6 +147,10 @@ window.ProfileSelectScreen = (function () {
   }
 
   function proceedWithProfile(profile, action) {
+    if (isProceeding) return;
+    isProceeding = true;
+    setTimeout(() => { isProceeding = false; }, 800);
+
     if (action === 'select') {
       window.Profiles.setActiveProfile(profile);
       if (window.Bridge) {

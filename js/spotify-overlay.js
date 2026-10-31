@@ -840,29 +840,13 @@
       }
       return true;
     }
-    if (btnEl && document.body.contains(btnEl)) return true;
-    var ref = findReference();
-    if (!ref || !ref.parentNode) return false;
-    btnEl = makeButtonLike(ref);
-    ref.parentNode.insertBefore(btnEl, ref);
-    return true;
-  }
-
-  function floatingButton() {
-    if (btnEl && document.body.contains(btnEl)) return;
-    injectCss();
-    btnEl = h('button', { class: 'sp-btn sp-float', type: 'button', 'aria-label': 'Spotify', text: '♫ Spotify', onclick: open });
-    btnEl.style.cssText = 'background:#17201a;color:#f1f5f2;border:1px solid #2a372e;border-radius:10px;padding:8px 14px;font:600 15px system-ui,sans-serif;cursor:pointer';
-    document.body.appendChild(btnEl);
+    return false;
   }
 
   function ensureButton() {
-    var tries = 0;
     var timer = setInterval(function () {
-      tries++;
-      if (placeButton()) { clearInterval(timer); watchButton(); return; }
-      if (tries >= 20) { clearInterval(timer); floatingButton(); }
-    }, 750);
+      if (placeButton()) { clearInterval(timer); watchButton(); }
+    }, 500);
     if (placeButton()) { clearInterval(timer); watchButton(); }
   }
 

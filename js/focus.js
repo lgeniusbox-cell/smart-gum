@@ -107,7 +107,9 @@ window.Focus = (function () {
   }
 
   function getRoot() {
-    return activeTrapContainer || document.getElementById('screen-container');
+    if (activeTrapContainer) return activeTrapContainer;
+    const activeScreen = document.querySelector('#screen-container .screen.active');
+    return activeScreen || document.getElementById('screen-container');
   }
 
   function recoverFocusIfLost() {
@@ -143,11 +145,13 @@ window.Focus = (function () {
   }
 
   function getFocusableElements(container) {
-    const root = container || activeTrapContainer || document.getElementById('screen-container');
+    const root = container || activeTrapContainer || document.querySelector('#screen-container .screen.active') || document.getElementById('screen-container');
     if (!root) return [];
 
     const candidates = Array.from(root.querySelectorAll('.focusable:not([disabled]):not([aria-hidden="true"])'));
     return candidates.filter((el) => {
+      // Exclude elements from inactive or exiting screens
+      if (el.closest('.screen:not(.active)') || el.closest('.screen.exiting')) return false;
       const style = window.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return false;
       const rect = el.getBoundingClientRect();

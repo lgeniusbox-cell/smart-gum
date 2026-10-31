@@ -79,7 +79,7 @@ window.Router = (function () {
   }
 
   async function navigate(targetScreenId, params = {}, addToHistory = true) {
-    if (targetScreenId === currentScreenId) return;
+    if (targetScreenId === currentScreenId || isTransitioning) return;
     const targetHandler = screens[targetScreenId];
     if (!targetHandler) {
       console.error(`[Router] Unknown screen: ${targetScreenId}`);
@@ -90,30 +90,41 @@ window.Router = (function () {
     if (window.Focus) window.Focus.hideFocusRing();
 
     const container = document.getElementById('screen-container');
-    const oldScreenEl = container ? container.querySelector('.screen.active') : null;
 
     // Save previous screen focus before leaving
- if (currentScreenId && addToHistory) {
-  historyStack.push({
-    screenId: currentScreenId,
-    params: currentParams,
-    focusedElement: window.Focus ? window.Focus.getCurrent() : null
-  });
-}
+    if (currentScreenId && addToHistory) {
+      historyStack.push({
+        screenId: currentScreenId,
+        params: currentParams,
+        focusedElement: window.Focus ? window.Focus.getCurrent() : null
+      });
+    }
 
-    // Unmount / exit old screen animation
-    if (oldScreenEl) {
-      oldScreenEl.classList.add('exiting');
-      oldScreenEl.classList.remove('active');
-      if (screens[currentScreenId] && screens[currentScreenId].onLeave) {
-        try {
-          screens[currentScreenId].onLeave();
-        } catch (e) {}
+    // Call onLeave on outgoing screen
+    if (currentScreenId && screens[currentScreenId] && screens[currentScreenId].onLeave) {
+      try {
+        screens[currentScreenId].onLeave();
+      } catch (e) {
+        console.warn('[Router] onLeave error:', e);
       }
+    }
+
+    // Unmount / exit ALL old screens with fade-out
+    const existingScreens = container ? Array.from(container.querySelectorAll('.screen')) : [];
+    if (existingScreens.length > 0) {
+      existingScreens.forEach(el => {
+        el.classList.add('exiting');
+        el.classList.remove('active');
+      });
       await new Promise(r => setTimeout(r, 140));
-      if (oldScreenEl.parentNode) {
-        oldScreenEl.parentNode.removeChild(oldScreenEl);
-      }
+      existingScreens.forEach(el => {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      });
+    }
+
+    // Guarantee container is pristine before mounting
+    if (container) {
+      container.innerHTML = '';
     }
 
     // Mount target screen
