@@ -63,6 +63,18 @@ window.Input = (function () {
     const key = e.key;
     const code = e.keyCode;
 
+    // While the user is typing in an editable text field (keyboard requested),
+    // don't hijack typing keys (letters, Space, Backspace, Left/Right caret...).
+    // Only Enter, Up/Down, Escape and the TV Back key are still routed.
+    const t = e.target;
+    const typing = t && (t.tagName === 'TEXTAREA' ||
+      (t.tagName === 'INPUT' && !t.readOnly && !['button', 'checkbox', 'radio', 'submit', 'reset'].includes(t.type)));
+    if (typing) {
+      const passThrough = key === 'Enter' || key === 'Escape' || key === 'ArrowUp' || key === 'ArrowDown' ||
+        code === 4 || code === 13 || code === 23 || code === 66 || code === 19 || code === 20 || code === 27;
+      if (!passThrough) return;
+    }
+
     let action = null;
 
     // Up
