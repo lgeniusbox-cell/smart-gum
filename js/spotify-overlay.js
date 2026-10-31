@@ -4,10 +4,12 @@
  * Features:
  *   - Mobile aspect ratio side drawer positioned at right-center
  *   - TV Remote D-Pad spatial navigation & Gamepad input
- *   - Curated high-energy sports, running, and gaming playlists (1-click embed play)
+ *   - Instant Universal Music Catalog search (zero-403 fallback with audio previews)
+ *   - Embedded In-Drawer Audio Preview Player with real-time progress & equalizer animation
+ *   - Curated high-energy sports, running, and gaming playlists (1-click Spotify embed)
  *   - Direct Spotify playlist/track URL & URI loader
- *   - PKCE OAuth authentication with configured Client ID
- *   - Robust 403 handling with Developer Dashboard setup guidance
+ *   - PKCE OAuth authentication for registered Spotify accounts
+ *   - TV Remote Back / Escape / Gamepad B exit handling
  */
 (function () {
   'use strict';
@@ -20,7 +22,7 @@
     CLIENT_ID: 'c71dede0d5f54fae87823d248c5eeadb',
     REDIRECT_URI: location.origin + location.pathname,
     TOKEN_PROXY_URL: '',
-    PAGE_SIZE: 12
+    PAGE_SIZE: 15
   };
 
   var API = 'https://api.spotify.com/v1';
@@ -94,7 +96,19 @@
   function lsGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
   function lsDel(k) { try { window.localStorage.removeItem(k); } catch (e) { /* ignore */ } }
-  function lsJson(k, def) { try { var v = JSON.parse(lsGet(k)); return v == null ? def : v; } catch (e) { return def; } }
+
+  function escapeHtml(s) {
+    var div = document.createElement('div');
+    div.textContent = s || '';
+    return div.innerHTML;
+  }
+
+  function formatTime(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    var m = Math.floor(sec / 60);
+    var s = sec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
 
   function h(tag, attrs, kids) {
     var el = document.createElement(tag);
@@ -262,6 +276,7 @@
       if (r.status === 401 && !retried) return api(path, true);
       if (r.status === 401) { clearTokens(); throw new Error('AUTH_REQUIRED'); }
       if (r.status === 403) {
+        clearTokens();
         throw new Error('403_DEV_MODE');
       }
       if (r.status === 429) {
@@ -294,7 +309,7 @@
     .sp-backdrop {
       position: fixed;
       inset: 0;
-      background: rgba(4, 7, 6, 0.62);
+      background: rgba(4, 7, 6, 0.65);
       backdrop-filter: blur(8px);
       -webkit-backdrop-filter: blur(8px);
       z-index: 2100;
@@ -465,7 +480,7 @@
     .sp-chips-row {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.6vw 0.5vw;
+      gap: 0.6vh 0.5vw;
     }
     .sp-chip {
       background: var(--sp-surface);
@@ -505,16 +520,21 @@
       align-items: center;
       gap: 1vw;
       background: var(--sp-surface);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1.5px solid rgba(255, 255, 255, 0.06);
       border-radius: 14px;
       padding: 1vh 1vw;
       cursor: pointer;
       text-align: left;
-      transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
+      transition: transform 180ms ease, background 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
     }
     .sp-card:hover {
       background: var(--sp-surface-hover);
       border-color: var(--sp-border-hover);
+    }
+    .sp-card.sp-playing {
+      border-color: var(--sp-accent);
+      background: rgba(30, 215, 96, 0.09);
+      box-shadow: 0 0 16px rgba(30, 215, 96, 0.2);
     }
     .sp-card-thumb {
       width: 5.6vh;
@@ -554,14 +574,23 @@
       background: rgba(30, 215, 96, 0.15);
       color: var(--sp-accent);
       border: 1px solid rgba(30, 215, 96, 0.3);
-      padding: 0.4vh 0.8vw;
+      padding: 0.5vh 0.8vw;
       border-radius: 999px;
       flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.3vw;
+      transition: all 160ms ease;
+    }
+    .sp-card:hover .sp-play-pill,
+    .sp-card.sp-playing .sp-play-pill {
+      background: var(--sp-accent);
+      color: #04120a;
     }
 
-    /* Embedded Player Container */
+    /* Embedded & Preview Player Container */
     .sp-player-wrap {
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      border-top: 1.5px solid rgba(30, 215, 96, 0.25);
       background: #090e0b;
       padding: 1.2vh 1.4vw;
       display: none;
@@ -576,22 +605,152 @@
       border-radius: 16px;
       background: #000;
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+      display: none;
     }
 
-    /* Info / Error Banner */
+    /* In-Drawer Preview Audio Player Bar */
+    .sp-preview-player {
+      display: flex;
+      flex-direction: column;
+      gap: 0.8vh;
+      background: linear-gradient(135deg, rgba(20, 32, 23, 0.95), rgba(12, 18, 14, 0.98));
+      border: 1px solid rgba(30, 215, 96, 0.3);
+      border-radius: 16px;
+      padding: 1vh 1.2vw;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.7);
+    }
+    .sp-prev-main {
+      display: flex;
+      align-items: center;
+      gap: 0.9vw;
+    }
+    .sp-prev-thumb {
+      width: 4.8vh;
+      height: 4.8vh;
+      border-radius: 10px;
+      object-fit: cover;
+      background: #19251d;
+      flex-shrink: 0;
+    }
+    .sp-prev-meta {
+      flex: 1;
+      min-width: 0;
+    }
+    .sp-prev-title {
+      font-size: 0.92rem;
+      font-weight: 800;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sp-prev-artist {
+      font-size: 0.78rem;
+      color: var(--sp-accent);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+    }
+    .sp-prev-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.6vw;
+    }
+    .sp-ctrl-btn {
+      width: 4vh;
+      height: 4vh;
+      border-radius: 50%;
+      background: var(--sp-surface);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 1.05rem;
+      transition: all 180ms ease;
+    }
+    .sp-ctrl-btn.sp-btn-play {
+      background: var(--sp-accent);
+      color: #04120a;
+      border-color: var(--sp-accent);
+      font-size: 1.15rem;
+    }
+    .sp-ctrl-btn:hover {
+      transform: scale(1.08);
+      border-color: var(--sp-accent);
+    }
+
+    /* Sound Bars (Equalizer Animation) */
+    .sp-eq-anim {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 18px;
+      padding: 0 0.3vw;
+    }
+    .sp-eq-bar {
+      width: 3px;
+      background: var(--sp-accent);
+      border-radius: 2px;
+      height: 6px;
+      animation: sp-eq-bounce 0.75s ease-in-out infinite alternate;
+    }
+    .sp-eq-bar:nth-child(1) { animation-delay: 0.1s; }
+    .sp-eq-bar:nth-child(2) { animation-delay: 0.35s; }
+    .sp-eq-bar:nth-child(3) { animation-delay: 0.2s; }
+    .sp-eq-bar:nth-child(4) { animation-delay: 0.45s; }
+    @keyframes sp-eq-bounce {
+      0% { height: 4px; }
+      50% { height: 16px; }
+      100% { height: 8px; }
+    }
+    .sp-eq-paused .sp-eq-bar {
+      animation-play-state: paused !important;
+      height: 4px !important;
+    }
+
+    /* Progress & Scrubber Bar */
+    .sp-scrubber-row {
+      display: flex;
+      align-items: center;
+      gap: 0.8vw;
+      width: 100%;
+    }
+    .sp-progress-track {
+      flex: 1;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      overflow: hidden;
+      position: relative;
+    }
+    .sp-progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #1db954, #1ed760);
+      border-radius: 999px;
+      transition: width 150ms linear;
+    }
+    .sp-progress-time {
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--sp-dim);
+      font-family: 'JetBrains Mono', monospace;
+      white-space: nowrap;
+    }
+
+    /* Notice / Notification Box */
     .sp-notice-box {
       background: rgba(30, 215, 96, 0.08);
       border: 1px solid rgba(30, 215, 96, 0.25);
       border-radius: 14px;
-      padding: 1.4vh 1.2vw;
+      padding: 1.2vh 1.2vw;
       font-size: 0.82rem;
       line-height: 1.4;
       color: #d1ded5;
-    }
-    .sp-notice-box.sp-warn {
-      background: rgba(255, 170, 0, 0.08);
-      border-color: rgba(255, 170, 0, 0.3);
-      color: #ffdda1;
+      position: relative;
     }
     .sp-notice-title {
       font-weight: 800;
@@ -600,6 +759,17 @@
       display: flex;
       align-items: center;
       gap: 0.4vw;
+      color: var(--sp-accent);
+    }
+    .sp-notice-close {
+      position: absolute;
+      top: 0.8vh;
+      right: 0.8vw;
+      background: transparent;
+      border: 0;
+      color: var(--sp-dim);
+      font-size: 1rem;
+      cursor: pointer;
     }
 
     /* Direct link input bar */
@@ -617,6 +787,7 @@
       border-radius: 12px;
       cursor: pointer;
       white-space: nowrap;
+      transition: all 160ms ease;
     }
   `;
 
@@ -626,6 +797,150 @@
     st.id = 'sp-style';
     st.textContent = CSS;
     (document.head || document.documentElement).appendChild(st);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Audio Preview Player Core                                          */
+  /* ------------------------------------------------------------------ */
+  var audioPlayer = null;
+  var currentTrack = null;
+
+  function initAudio() {
+    if (audioPlayer) return;
+    audioPlayer = new Audio();
+    audioPlayer.addEventListener('timeupdate', onAudioTimeUpdate);
+    audioPlayer.addEventListener('ended', onAudioEnded);
+    audioPlayer.addEventListener('play', function () { updateAudioUI(true); });
+    audioPlayer.addEventListener('pause', function () { updateAudioUI(false); });
+    audioPlayer.addEventListener('error', function () {
+      console.warn('[MatPad Audio] Audio stream error');
+      if (window.Notify) {
+        window.Notify.show({ type: 'warning', title: 'Audio Stream', message: 'Could not stream preview track' });
+      }
+      stopAudio();
+    });
+  }
+
+  function playPreviewTrack(track) {
+    initAudio();
+    currentTrack = track;
+
+    // Hide Spotify embed iframe
+    if (dom.playerFrame) {
+      dom.playerFrame.src = '';
+      dom.playerFrame.style.display = 'none';
+    }
+
+    if (!track.previewUrl) {
+      if (window.Notify) {
+        window.Notify.show({ type: 'warning', title: 'No Preview', message: 'No 30-sec preview available for this track' });
+      }
+      return;
+    }
+
+    audioPlayer.src = track.previewUrl;
+    audioPlayer.currentTime = 0;
+    audioPlayer.play().catch(function (e) {
+      console.warn('[Audio Play] Error:', e);
+    });
+
+    showPreviewPlayer(track);
+    updateActiveCardHighlight();
+
+    if (window.Notify) {
+      window.Notify.show({
+        type: 'success',
+        title: 'Now Playing',
+        message: track.title + ' — ' + track.artist,
+        duration: 3500
+      });
+    }
+  }
+
+  function toggleAudioPlay() {
+    if (!audioPlayer || !currentTrack) return;
+    if (audioPlayer.paused) {
+      audioPlayer.play().catch(function () {});
+    } else {
+      audioPlayer.pause();
+    }
+  }
+
+  function stopAudio() {
+    if (audioPlayer) {
+      audioPlayer.pause();
+      audioPlayer.currentTime = 0;
+    }
+    currentTrack = null;
+    if (dom.previewPlayer) dom.previewPlayer.style.display = 'none';
+    if (dom.playerWrap && (!dom.playerFrame || dom.playerFrame.style.display === 'none')) {
+      dom.playerWrap.classList.remove('sp-active');
+    }
+    updateActiveCardHighlight();
+  }
+
+  function onAudioTimeUpdate() {
+    if (!audioPlayer || !dom.prevFill || !dom.prevTime) return;
+    var cur = audioPlayer.currentTime || 0;
+    var dur = audioPlayer.duration || 30;
+    var pct = Math.min(100, (cur / dur) * 100);
+    dom.prevFill.style.width = pct + '%';
+    dom.prevTime.textContent = formatTime(cur) + ' / ' + formatTime(dur);
+  }
+
+  function onAudioEnded() {
+    if (dom.prevFill) dom.prevFill.style.width = '100%';
+    updateAudioUI(false);
+  }
+
+  function updateAudioUI(isPlaying) {
+    if (dom.prevPlayBtn) {
+      dom.prevPlayBtn.innerHTML = isPlaying ? '⏸' : '▶';
+    }
+    if (dom.prevEq) {
+      if (isPlaying) dom.prevEq.classList.remove('sp-eq-paused');
+      else dom.prevEq.classList.add('sp-eq-paused');
+    }
+    updateActiveCardHighlight();
+  }
+
+  function showPreviewPlayer(track) {
+    if (!dom.previewPlayer || !dom.playerWrap) return;
+    dom.prevCover.src = track.img || '';
+    dom.prevTitle.textContent = track.title || 'Track';
+    dom.prevArtist.textContent = track.artist || 'Artist';
+    dom.prevTime.textContent = '0:00 / 0:30';
+    dom.prevFill.style.width = '0%';
+    dom.prevPlayBtn.innerHTML = '⏸';
+    if (dom.prevEq) dom.prevEq.classList.remove('sp-eq-paused');
+
+    dom.previewPlayer.style.display = 'flex';
+    dom.playerWrap.classList.add('sp-active');
+
+    // Scroll player into view
+    setTimeout(function () {
+      dom.playerWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 150);
+  }
+
+  function updateActiveCardHighlight() {
+    if (!dom.resultsBox) return;
+    var cards = dom.resultsBox.querySelectorAll('.sp-card');
+    cards.forEach(function (card) {
+      var isCurrent = currentTrack && String(card.getAttribute('data-track-id')) === String(currentTrack.id);
+      if (isCurrent) {
+        card.classList.add('sp-playing');
+        var pill = card.querySelector('.sp-play-pill');
+        if (pill) {
+          var isPlaying = audioPlayer && !audioPlayer.paused;
+          pill.innerHTML = isPlaying ? '🔊 PLAYING' : '⏸ PAUSED';
+        }
+      } else {
+        card.classList.remove('sp-playing');
+        var p = card.querySelector('.sp-play-pill');
+        if (p) p.innerHTML = '▶ PLAY';
+      }
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -740,6 +1055,9 @@
       })
     ]);
 
+    // Notice box for instant mode or auth info
+    dom.noticeBox = h('div', { class: 'sp-notice-box', style: 'display: none;' });
+
     // Results container
     dom.resultsBox = h('div', { class: 'sp-cards-list' });
 
@@ -748,9 +1066,6 @@
       h('div', { class: 'sp-section-title', text: 'Featured TV Mat Playlists' }),
       h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' }, renderCuratedCards())
     ]);
-
-    // Notice box for 403 or auth
-    dom.noticeBox = h('div', { class: 'sp-notice-box', style: 'display: none;' });
 
     // Assemble body
     dom.body.appendChild(searchRow);
@@ -762,11 +1077,64 @@
 
     // Bottom Embedded Player Wrap
     dom.playerWrap = h('div', { class: 'sp-player-wrap' });
+
+    // Spotify Iframe Embed Player
     dom.playerFrame = h('iframe', {
       class: 'sp-player-frame',
       allow: 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture',
       loading: 'lazy'
     });
+
+    // In-Drawer Audio Preview Player
+    dom.prevCover = h('img', { class: 'sp-prev-thumb', alt: 'Cover' });
+    dom.prevTitle = h('div', { class: 'sp-prev-title', text: 'Track Title' });
+    dom.prevArtist = h('div', { class: 'sp-prev-artist', text: 'Artist' });
+    dom.prevEq = h('div', { class: 'sp-eq-anim' }, [
+      h('div', { class: 'sp-eq-bar' }),
+      h('div', { class: 'sp-eq-bar' }),
+      h('div', { class: 'sp-eq-bar' }),
+      h('div', { class: 'sp-eq-bar' })
+    ]);
+
+    dom.prevPlayBtn = h('button', {
+      class: 'sp-ctrl-btn sp-btn-play sp-nav',
+      type: 'button',
+      'aria-label': 'Play/Pause',
+      html: '⏸',
+      onclick: toggleAudioPlay
+    });
+
+    dom.prevStopBtn = h('button', {
+      class: 'sp-ctrl-btn sp-nav',
+      type: 'button',
+      'aria-label': 'Stop Preview',
+      html: '⏹',
+      onclick: stopAudio
+    });
+
+    dom.prevFill = h('div', { class: 'sp-progress-fill' });
+    dom.prevTime = h('span', { class: 'sp-progress-time', text: '0:00 / 0:30' });
+
+    dom.previewPlayer = h('div', { class: 'sp-preview-player', style: 'display: none;' }, [
+      h('div', { class: 'sp-prev-main' }, [
+        dom.prevCover,
+        h('div', { class: 'sp-prev-meta' }, [
+          dom.prevTitle,
+          dom.prevArtist
+        ]),
+        dom.prevEq,
+        h('div', { class: 'sp-prev-controls' }, [
+          dom.prevPlayBtn,
+          dom.prevStopBtn
+        ])
+      ]),
+      h('div', { class: 'sp-scrubber-row' }, [
+        h('div', { class: 'sp-progress-track' }, [dom.prevFill]),
+        dom.prevTime
+      ])
+    ]);
+
+    dom.playerWrap.appendChild(dom.previewPlayer);
     dom.playerWrap.appendChild(dom.playerFrame);
 
     // Assemble Root
@@ -806,6 +1174,13 @@
 
   function playEmbed(type, id) {
     if (!dom.playerWrap || !dom.playerFrame) return;
+
+    // Stop preview audio if running
+    stopAudio();
+
+    if (dom.previewPlayer) dom.previewPlayer.style.display = 'none';
+    dom.playerFrame.style.display = 'block';
+
     var embedUrl = 'https://open.spotify.com/embed/' + encodeURIComponent(type) + '/' + encodeURIComponent(id) + '?utm_source=generator&theme=0';
     dom.playerFrame.src = embedUrl;
     dom.playerWrap.classList.add('sp-active');
@@ -832,7 +1207,11 @@
       playEmbed(parsed.type, parsed.id);
       dom.linkInput.value = '';
     } else {
-      showNotice('Please enter a valid Spotify playlist or track URL (e.g. open.spotify.com/playlist/...)', true);
+      showNotice(
+        '<div class="sp-notice-title"><span>⚠️</span> Direct Link Notice</div>' +
+        '<div>Please enter a valid Spotify playlist or track URL (e.g. open.spotify.com/playlist/...)</div>',
+        true
+      );
     }
   }
 
@@ -847,57 +1226,130 @@
     }
     S.searchTimer = setTimeout(function () {
       runSearch(q);
-    }, 450);
+    }, 400);
   }
 
+  /* ------------------------------------------------------------------ */
+  /*  Dual Search Engine: Spotify OAuth with Instant Fallback            */
+  /* ------------------------------------------------------------------ */
   function runSearch(query) {
     if (!query) return;
-    dom.resultsBox.innerHTML = '<div style="padding: 2vh 0; text-align: center; color: var(--sp-dim);">Searching Spotify...</div>';
+    query = query.trim();
+    if (!query) return;
 
-    // Check if user has session or token
-    api('/search?q=' + encodeURIComponent(query) + '&type=track,playlist&limit=' + CONFIG.PAGE_SIZE)
-      .then(function (res) {
-        dom.curatedSection.style.display = 'none';
-        dom.noticeBox.style.display = 'none';
-        renderSearchResults(res);
-      })
-      .catch(function (err) {
-        console.warn('[Spotify Overlay] Search error:', err);
-        handleSearchError(err, query);
-      });
-  }
+    dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim); font-size: 0.9rem;">🔎 Searching music for "<strong>' + escapeHtml(query) + '</strong>"...</div>';
 
-  function handleSearchError(err, query) {
-    dom.resultsBox.innerHTML = '';
-    dom.curatedSection.style.display = '';
-
-    if (err && (err.message === '403_DEV_MODE' || err.message.indexOf('403') !== -1)) {
-      showNotice(
-        '<strong>Spotify Developer Mode (Error 403)</strong><br>' +
-        'Spotify requires registering your Spotify account email under <em>"Users and Access"</em> inside your <a href="https://developer.spotify.com/dashboard" target="_blank" style="color: #1ed760; text-decoration: underline;">Spotify Developer Dashboard</a>.<br><br>' +
-        '👉 <strong>Ready to Play:</strong> You can still play all featured running and workout playlists below with 1 click, or paste any Spotify link directly!',
-        true
-      );
-    } else if (err && err.message === 'AUTH_REQUIRED') {
-      showNotice(
-        '<strong>Spotify Login Required</strong><br>' +
-        'Connect your Spotify account to search tracks.<br>' +
-        '<button type="button" class="sp-btn-action sp-nav" style="margin-top: 1vh; padding: 0.8vh 1.4vw;" onclick="window.SpotifyOverlay.login()">Connect with Spotify</button>',
-        false
-      );
+    // If user has an active Spotify session, try native Spotify API first
+    if (hasSession()) {
+      api('/search?q=' + encodeURIComponent(query) + '&type=track,playlist&limit=' + CONFIG.PAGE_SIZE)
+        .then(function (res) {
+          dom.curatedSection.style.display = 'none';
+          dom.noticeBox.style.display = 'none';
+          renderSpotifyResults(res, query);
+        })
+        .catch(function (err) {
+          console.warn('[Spotify Native Search] Error, falling back to universal music catalog:', err);
+          var is403 = err && (err.message === '403_DEV_MODE' || String(err.message).indexOf('403') !== -1);
+          if (is403) {
+            clearTokens();
+          }
+          // Fall back seamlessly to universal catalog so search never fails
+          searchUniversalCatalog(query, is403);
+        });
     } else {
-      showNotice('Spotify Search: ' + ((err && err.message) || 'Error searching catalog') + '. Please try the curated workout playlists below.', true);
+      // Direct instant catalog search (zero login required, works out of the box)
+      searchUniversalCatalog(query, false);
     }
   }
 
-  function showNotice(html, isWarn) {
-    if (!dom.noticeBox) return;
-    dom.noticeBox.className = 'sp-notice-box' + (isWarn ? ' sp-warn' : '');
-    dom.noticeBox.innerHTML = html;
-    dom.noticeBox.style.display = '';
+  function searchUniversalCatalog(query, is403Fallback) {
+    fetch('https://itunes.apple.com/search?term=' + encodeURIComponent(query) + '&entity=song&limit=16')
+      .then(function (r) {
+        if (!r.ok) throw new Error('Search failed: ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        dom.curatedSection.style.display = 'none';
+        if (is403Fallback) {
+          showNotice(
+            '<div class="sp-notice-title"><span>⚡</span> Instant Music Mode Active</div>' +
+            '<div>Showing playable songs with instant in-drawer audio previews for <strong>"' + escapeHtml(query) + '"</strong>.</div>' +
+            '<div style="margin-top: 0.6vh; font-size: 0.76rem; color: #a4b8ab;">Tip: To also link direct Spotify API search, add your Spotify email under <em>Users and Access</em> in <a href="https://developer.spotify.com/dashboard" target="_blank" style="color: #1ed760; text-decoration: underline;">Spotify Developer Dashboard</a>.</div>',
+            false
+          );
+        } else {
+          dom.noticeBox.style.display = 'none';
+        }
+        renderUniversalResults(data.results || [], query);
+      })
+      .catch(function (err) {
+        console.warn('[Universal Search] Error:', err);
+        dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim);">Could not load search results. Please choose from the curated workout playlists below or paste a Spotify link.</div>';
+        dom.curatedSection.style.display = '';
+      });
   }
 
-  function renderSearchResults(data) {
+  function renderUniversalResults(results, query) {
+    if (!results || !results.length) {
+      dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim);">No songs found for "<strong>' + escapeHtml(query) + '</strong>". Try another artist, track, or workout vibe above.</div>';
+      dom.curatedSection.style.display = '';
+      return;
+    }
+
+    dom.resultsBox.innerHTML = '';
+    var header = h('div', { class: 'sp-section-title' }, [
+      h('span', { text: 'Tracks (' + results.length + ')' }),
+      h('span', { style: 'font-size: 0.72rem; color: var(--sp-dim); font-weight: 600;', text: 'Press OK to Play' })
+    ]);
+    dom.resultsBox.appendChild(header);
+
+    var list = h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' });
+    results.forEach(function (r) {
+      var trackObj = {
+        id: r.trackId,
+        title: r.trackName,
+        artist: r.artistName,
+        album: r.collectionName || '',
+        img: (r.artworkUrl100 || '').replace('100x100bb.jpg', '300x300bb.jpg'),
+        previewUrl: r.previewUrl,
+        duration: Math.round((r.trackTimeMillis || 30000) / 1000)
+      };
+
+      var isPlaying = currentTrack && String(currentTrack.id) === String(trackObj.id);
+
+      var card = h('div', {
+        class: 'sp-card sp-nav' + (isPlaying ? ' sp-playing' : ''),
+        'data-track-id': String(trackObj.id),
+        tabindex: '0',
+        role: 'button',
+        onclick: function () {
+          if (currentTrack && String(currentTrack.id) === String(trackObj.id)) {
+            toggleAudioPlay();
+          } else {
+            playPreviewTrack(trackObj);
+          }
+        }
+      }, [
+        trackObj.img ? h('img', {
+          class: 'sp-card-thumb',
+          src: trackObj.img,
+          alt: trackObj.title,
+          onerror: function () { this.style.display = 'none'; }
+        }) : h('div', { class: 'sp-card-thumb', text: '🎵' }),
+        h('div', { class: 'sp-card-body' }, [
+          h('div', { class: 'sp-card-title', text: trackObj.title }),
+          h('div', { class: 'sp-card-sub', text: trackObj.artist + (trackObj.album ? ' · ' + trackObj.album : '') })
+        ]),
+        h('div', { class: 'sp-play-pill', html: isPlaying ? '🔊 PLAYING' : '▶ PLAY' })
+      ]);
+
+      list.appendChild(card);
+    });
+
+    dom.resultsBox.appendChild(list);
+  }
+
+  function renderSpotifyResults(data, query) {
     var items = [];
     if (data.tracks && data.tracks.items) {
       items = items.concat(data.tracks.items.map(function (t) {
@@ -914,12 +1366,13 @@
     }
 
     if (!items.length) {
-      dom.resultsBox.innerHTML = '<div style="padding: 2vh 0; text-align: center; color: var(--sp-dim);">No results found. Try another query or select a workout vibe above.</div>';
+      // If Spotify returned 0 results, query universal catalog
+      searchUniversalCatalog(query, false);
       return;
     }
 
     dom.resultsBox.innerHTML = '';
-    var header = h('div', { class: 'sp-section-title', text: 'Search Results' });
+    var header = h('div', { class: 'sp-section-title', text: 'Spotify Search Results' });
     dom.resultsBox.appendChild(header);
 
     var list = h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' });
@@ -940,6 +1393,12 @@
       list.appendChild(card);
     });
     dom.resultsBox.appendChild(list);
+  }
+
+  function showNotice(html, isWarn) {
+    if (!dom.noticeBox) return;
+    dom.noticeBox.innerHTML = html + '<button class="sp-notice-close" aria-label="Dismiss notice" onclick="this.parentElement.style.display=\'none\'">✕</button>';
+    dom.noticeBox.style.display = '';
   }
 
   /* ------------------------------------------------------------------ */
@@ -1057,7 +1516,7 @@
       if (map[e.key]) {
         var activeTag = document.activeElement ? document.activeElement.tagName : '';
         if (activeTag === 'INPUT' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-          return; // Let typing caret move
+          return; // Let typing caret move inside input
         }
         e.preventDefault();
         navigateDpad(map[e.key]);
@@ -1080,7 +1539,7 @@
       window.Focus.hideFocusRing();
     }
 
-    // Default focus to search bar or first curated card
+    // Default focus to search bar
     setTimeout(function () {
       if (dom.searchInput) dom.searchInput.focus();
     }, 250);
@@ -1091,6 +1550,12 @@
     dom.root.classList.remove('sp-open');
     if (dom.backdrop) dom.backdrop.classList.remove('sp-open');
     S.open = false;
+
+    // Pause audio preview on drawer exit so user isn't stuck with unexpected noise
+    if (audioPlayer && !audioPlayer.paused) {
+      audioPlayer.pause();
+      updateAudioUI(false);
+    }
 
     if (window.Focus && window.Focus.showFocusRing) {
       window.Focus.showFocusRing();
@@ -1121,7 +1586,6 @@
     }
   }
 
-  // Observe DOM for mainScreen rendering to bind button
   function watchHeaderButton() {
     bindHeaderButton();
     if (!window.MutationObserver) return;
@@ -1138,6 +1602,7 @@
     close: requestClose,
     isOpen: function () { return S.open; },
     play: playEmbed,
+    playPreview: playPreviewTrack,
     login: startLogin,
     config: CONFIG
   };
