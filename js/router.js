@@ -14,7 +14,8 @@ window.Router = (function () {
   let currentScreenId = null;
   let isTransitioning = false;
   let exitModalEl = null;
-
+  let currentParams = {};
+  
   function register(id, screenHandler) {
     screens[id] = screenHandler;
   }
@@ -92,13 +93,13 @@ window.Router = (function () {
     const oldScreenEl = container ? container.querySelector('.screen.active') : null;
 
     // Save previous screen focus before leaving
-    if (currentScreenId && addToHistory) {
-      historyStack.push({
-        screenId: currentScreenId,
-        params: params,
-        focusedElement: window.Focus ? window.Focus.getCurrent() : null
-      });
-    }
+ if (currentScreenId && addToHistory) {
+  historyStack.push({
+    screenId: currentScreenId,
+    params: currentParams,
+    focusedElement: window.Focus ? window.Focus.getCurrent() : null
+  });
+}
 
     // Unmount / exit old screen animation
     if (oldScreenEl) {
@@ -117,6 +118,7 @@ window.Router = (function () {
 
     // Mount target screen
     currentScreenId = targetScreenId;
+    currentParams = params;
     if (window.BgController) {
       window.BgController.setScreen(targetScreenId);
     }
