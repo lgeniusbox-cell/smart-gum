@@ -22,7 +22,7 @@
   /*  CONFIG                                                             */
   /* ------------------------------------------------------------------ */
   var CONFIG = {
-    CLIENT_ID: 'PASTE_YOUR_CLIENT_ID',
+    CLIENT_ID: 'c71dede0d5f54fae87823d248c5eeadb',
     // Must match a Redirect URI registered in the Spotify dashboard.
     REDIRECT_URI: location.origin + location.pathname,
     // Optional: URL of your own tiny server that returns
