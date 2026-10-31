@@ -1,18 +1,13 @@
 /*!
  * spotify-overlay.js
- * Self-contained Spotify overlay for the matpad page (TV remote + touch).
- *
- * HOW TO USE
- *   1. Paste your Client ID in CONFIG.CLIENT_ID below.
- *   2. Add  <script src="spotify-overlay.js"></script>  at the end of index.html
- *      (or paste this whole file at the end of index.js).
- *   3. In the Spotify dashboard, add this exact Redirect URI:
- *        https://lgeniusbox-cell.github.io/matpad-app/
- *
- * It adds a "Spotify" button before your Settings / Profile button, opens a
- * full-screen overlay (search songs / artists / albums / playlists, open a
- * playlist by link, saved playlists) and plays through Spotify's embed player.
- * Public API: window.SpotifyOverlay.open() / .close()
+ * High-performance, TV-optimized Spotify companion drawer for MatPad TV.
+ * Features:
+ *   - Mobile aspect ratio side drawer positioned at right-center
+ *   - TV Remote D-Pad spatial navigation & Gamepad input
+ *   - Curated high-energy sports, running, and gaming playlists (1-click embed play)
+ *   - Direct Spotify playlist/track URL & URI loader
+ *   - PKCE OAuth authentication with configured Client ID
+ *   - Robust 403 handling with Developer Dashboard setup guidance
  */
 (function () {
   'use strict';
@@ -23,24 +18,78 @@
   /* ------------------------------------------------------------------ */
   var CONFIG = {
     CLIENT_ID: 'c71dede0d5f54fae87823d248c5eeadb',
-    // Must match a Redirect URI registered in the Spotify dashboard.
     REDIRECT_URI: location.origin + location.pathname,
-    // Optional: URL of your own tiny server that returns
-    // {"access_token":"...","expires_in":3600} (Client Credentials flow).
-    // If set, no login screen is shown.
     TOKEN_PROXY_URL: '',
-    // Optional CSS selector of the header button the Spotify button goes before
-    // (e.g. '#settings-btn'). Leave empty to auto-detect Settings / Profile.
-    BUTTON_SELECTOR: '',
-    PAGE_SIZE: 10 // Spotify caps search at 10 per request
+    PAGE_SIZE: 12
   };
 
   var API = 'https://api.spotify.com/v1';
   var TOKEN_URL = 'https://accounts.spotify.com/api/token';
   var AUTH_URL = 'https://accounts.spotify.com/authorize';
 
+  // Curated MatPad workout & gaming playlists that play with zero-config in Spotify Embed
+  var CURATED_PLAYLISTS = [
+    {
+      id: '37i9dQZF1DXadOVCgGhL7j',
+      type: 'playlist',
+      title: 'Running Tempo 160-175 BPM',
+      sub: 'High cadence beats for treadmill & running mat',
+      icon: '🏃',
+      cover: 'https://images.unsplash.com/photo-1461896836934-ffe607ba8211?auto=format&fit=crop&w=400&q=80'
+    },
+    {
+      id: '37i9dQZF1DX76Wlfdnj7AP',
+      type: 'playlist',
+      title: 'Beast Mode Cardio',
+      sub: 'Heavy bass & energetic EDM remixes',
+      icon: '⚡',
+      cover: 'https://images.unsplash.com/photo-1517838277536-f5f99be501cd?auto=format&fit=crop&w=400&q=80'
+    },
+    {
+      id: '37i9dQZF1DXdLEN7aqioXM',
+      type: 'playlist',
+      title: 'Gaming Energy & Phonk',
+      sub: 'Drift phonk & electro for Lava Runner reflex',
+      icon: '🎮',
+      cover: 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&w=400&q=80'
+    },
+    {
+      id: '37i9dQZF1DX35JVl5u92Wj',
+      type: 'playlist',
+      title: 'Cardio Dance Hits',
+      sub: 'Uptempo pop & electronic club floor fillers',
+      icon: '🔥',
+      cover: 'https://images.unsplash.com/photo-1518611012118-696072aa579a?auto=format&fit=crop&w=400&q=80'
+    },
+    {
+      id: '37i9dQZF1DXd9rSDyQguIk',
+      type: 'playlist',
+      title: 'Lo-Fi Chill Focus',
+      sub: 'Smooth instrumental beats for steady sessions',
+      icon: '🎧',
+      cover: 'https://images.unsplash.com/photo-1506126613408-eca07ce68773?auto=format&fit=crop&w=400&q=80'
+    },
+    {
+      id: '37i9dQZF1DX4WYpdgoIcn6',
+      type: 'playlist',
+      title: 'Cool Down & Stretch',
+      sub: 'Ambient calming tracks post-workout recovery',
+      icon: '🧘',
+      cover: 'https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?auto=format&fit=crop&w=400&q=80'
+    }
+  ];
+
+  var QUICK_MOODS = [
+    { label: '🏃 160 BPM Run', query: 'Running 160 BPM' },
+    { label: '⚡ Cardio Energy', query: 'Cardio Workout' },
+    { label: '🎮 Gaming Bass', query: 'Gaming EDM' },
+    { label: '🔥 Drift Phonk', query: 'Gym Phonk' },
+    { label: '🎧 Lo-Fi Beats', query: 'Lo-Fi Beats' },
+    { label: '💪 Gym Hits', query: 'Workout Motivation' }
+  ];
+
   /* ------------------------------------------------------------------ */
-  /*  Small helpers                                                      */
+  /*  Helpers                                                            */
   /* ------------------------------------------------------------------ */
   function lsGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
@@ -55,6 +104,7 @@
         if (v == null || v === false) return;
         if (k === 'class') el.className = v;
         else if (k === 'text') el.textContent = v;
+        else if (k === 'html') el.innerHTML = v;
         else if (k.slice(0, 2) === 'on' && typeof v === 'function') el.addEventListener(k.slice(2), v);
         else el.setAttribute(k, v === true ? '' : v);
       });
@@ -65,13 +115,6 @@
     });
     return el;
   }
-
-  function isTV() { return window.__deviceMode === 'tv'; }
-
-  /* ------------------------------------------------------------------ */
-  /*  Auth (PKCE, no secret) + optional token proxy                      */
-  /* ------------------------------------------------------------------ */
-  var memToken = null; // {value, exp}
 
   function randomString(len) {
     var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
@@ -88,6 +131,11 @@
     for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
+
+  /* ------------------------------------------------------------------ */
+  /*  Auth & Tokens                                                      */
+  /* ------------------------------------------------------------------ */
+  var memToken = null;
 
   function clientIdMissing() {
     return !CONFIG.CLIENT_ID || CONFIG.CLIENT_ID.indexOf('PASTE_') === 0;
@@ -106,7 +154,9 @@
 
   function clearTokens() {
     memToken = null;
-    lsDel('sp_access'); lsDel('sp_exp'); lsDel('sp_refresh');
+    lsDel('sp_access');
+    lsDel('sp_exp');
+    lsDel('sp_refresh');
   }
 
   function formPost(params) {
@@ -126,9 +176,9 @@
   }
 
   function startLogin() {
-    if (clientIdMissing()) return Promise.reject(new Error('Set CONFIG.CLIENT_ID first.'));
+    if (clientIdMissing()) return Promise.reject(new Error('Spotify Client ID is required.'));
     if (!window.crypto || !window.crypto.subtle) {
-      return Promise.reject(new Error('This browser cannot do secure login (crypto.subtle needs HTTPS).'));
+      return Promise.reject(new Error('Secure login requires crypto.subtle (HTTPS).'));
     }
     var verifier = randomString(96);
     var state = randomString(16);
@@ -136,17 +186,18 @@
       lsSet('sp_verifier', verifier);
       lsSet('sp_state', state);
       lsSet('sp_reopen', '1');
+      var scopes = 'user-read-private user-read-email playlist-read-private';
       var q = 'client_id=' + encodeURIComponent(CONFIG.CLIENT_ID) +
         '&response_type=code' +
         '&redirect_uri=' + encodeURIComponent(CONFIG.REDIRECT_URI) +
         '&code_challenge_method=S256' +
         '&code_challenge=' + b64url(digest) +
-        '&state=' + encodeURIComponent(state);
+        '&state=' + encodeURIComponent(state) +
+        '&scope=' + encodeURIComponent(scopes);
       window.location.href = AUTH_URL + '?' + q;
     });
   }
 
-  // Runs on page load: finish the login if we came back with ?code=...
   function handleRedirect() {
     var params;
     try { params = new URLSearchParams(window.location.search); } catch (e) { return Promise.resolve(); }
@@ -204,18 +255,18 @@
     return refreshToken();
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  API                                                                */
-  /* ------------------------------------------------------------------ */
   function api(path, retried) {
     return getToken(!!retried).then(function (token) {
       return fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
     }).then(function (r) {
       if (r.status === 401 && !retried) return api(path, true);
       if (r.status === 401) { clearTokens(); throw new Error('AUTH_REQUIRED'); }
+      if (r.status === 403) {
+        throw new Error('403_DEV_MODE');
+      }
       if (r.status === 429) {
         var wait = r.headers.get('Retry-After');
-        throw new Error('Spotify is rate limiting requests. Try again in ' + (wait || 'a few') + ' seconds.');
+        throw new Error('Spotify rate limit. Retry in ' + (wait || 'a few') + 's.');
       }
       return r.json().catch(function () { return {}; }).then(function (j) {
         if (!r.ok) {
@@ -227,128 +278,347 @@
     });
   }
 
-  function img(images) {
-    if (!images || !images.length) return '';
-    // pick a mid-size image when available
-    var best = images[images.length > 1 ? 1 : 0];
-    return (best && best.url) || '';
-  }
-
-  function names(list) {
-    return (list || []).map(function (a) { return a && a.name; }).filter(Boolean).join(', ');
-  }
-
-  function norm(type, o, fallbackImg) {
-    if (!o || !o.id) return null;
-    if (type === 'track') {
-      return { type: 'track', id: o.id, name: o.name, sub: names(o.artists) + (o.album && o.album.name ? ' · ' + o.album.name : ''), img: img(o.album && o.album.images) || fallbackImg || '' };
-    }
-    if (type === 'artist') {
-      return { type: 'artist', id: o.id, name: o.name, sub: (o.genres && o.genres.length) ? o.genres.slice(0, 2).join(', ') : 'Artist', img: img(o.images) };
-    }
-    if (type === 'album') {
-      return { type: 'album', id: o.id, name: o.name, sub: names(o.artists) + (o.release_date ? ' · ' + String(o.release_date).slice(0, 4) : ''), img: img(o.images) };
-    }
-    if (type === 'playlist') {
-      return { type: 'playlist', id: o.id, name: o.name, sub: (o.owner && o.owner.display_name) ? 'By ' + o.owner.display_name : 'Playlist', img: img(o.images) };
-    }
+  function parseSpotifyUrl(input) {
+    var s = String(input || '').trim();
+    if (!s) return null;
+    var m = s.match(/(playlist|track|album|artist)[/:]([A-Za-z0-9]{15,})/);
+    if (m) return { type: m[1], id: m[2] };
+    if (/^[A-Za-z0-9]{18,32}$/.test(s)) return { type: 'playlist', id: s };
     return null;
   }
 
-  function search(query, type, offset) {
-    var path = '/search?q=' + encodeURIComponent(query) + '&type=' + type + '&limit=' + CONFIG.PAGE_SIZE + '&offset=' + offset;
-    return api(path).then(function (j) {
-      var box = j[type + 's'] || { items: [], total: 0 };
-      var raw = box.items || [];
-      return { raw: raw.length, total: box.total || 0, items: raw.map(function (o) { return norm(type, o); }).filter(Boolean) };
-    });
-  }
-
-  function artistAlbums(id, offset) {
-    return api('/artists/' + id + '/albums?include_groups=album,single&limit=' + CONFIG.PAGE_SIZE + '&offset=' + offset).then(function (j) {
-      var raw = j.items || [];
-      return { raw: raw.length, total: j.total || 0, items: raw.map(function (o) { return norm('album', o); }).filter(Boolean) };
-    });
-  }
-
-  function albumTracks(id, offset) {
-    return api('/albums/' + id + '/tracks?limit=50&offset=' + offset).then(function (j) {
-      var raw = j.items || [];
-      return { raw: raw.length, total: j.total || 0, items: raw.map(function (o) { return norm('track', o); }).filter(Boolean) };
-    });
-  }
-
-  function playlistTracks(id, offset) {
-    function shape(j) {
-      var raw = j.items || [];
-      var items = raw.map(function (x) {
-        var t = x && (x.track || x.item || x);
-        return t && t.type === 'track' ? norm('track', t) : null;
-      }).filter(Boolean);
-      return { raw: raw.length, total: j.total || 0, items: items };
+  /* ------------------------------------------------------------------ */
+  /*  Styles: Sleek Right-Center Mobile Aspect Ratio Drawer               */
+  /* ------------------------------------------------------------------ */
+  var CSS = `
+    .sp-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 7, 6, 0.62);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 2100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 280ms ease;
     }
-    var q = '?limit=50&offset=' + offset;
-    // Spotify renamed the playlist tracks endpoint in 2026; try the new one first.
-    return api('/playlists/' + id + '/items' + q).then(shape).catch(function (e) {
-      if (e.message === 'AUTH_REQUIRED') throw e;
-      return api('/playlists/' + id + '/tracks' + q).then(shape);
-    });
-  }
+    .sp-backdrop.sp-open {
+      opacity: 1;
+      pointer-events: auto;
+    }
 
-  function playlistMeta(id) {
-    return api('/playlists/' + id + '?fields=name').then(function (j) { return j.name || 'Playlist'; });
-  }
+    .sp-ov {
+      --sp-bg: #0d120f;
+      --sp-surface: #141b16;
+      --sp-surface-hover: #1c261f;
+      --sp-border: rgba(30, 215, 96, 0.24);
+      --sp-border-hover: rgba(30, 215, 96, 0.6);
+      --sp-text: #f3f7f4;
+      --sp-dim: #90a395;
+      --sp-accent: #1ed760;
+      --sp-glow: rgba(30, 215, 96, 0.35);
 
-  function parseSpotifyId(input, kind) {
-    var s = String(input || '').trim();
-    var m = s.match(new RegExp(kind + '[/:]([A-Za-z0-9]{10,})'));
-    if (m) return m[1];
-    if (/^[A-Za-z0-9]{10,}$/.test(s)) return s;
-    return '';
-  }
+      position: fixed;
+      right: 3vw;
+      top: 4.5vh;
+      bottom: 4.5vh;
+      width: min(440px, 35vw);
+      z-index: 2101;
+      display: flex;
+      flex-direction: column;
+      background: linear-gradient(180deg, #17211a 0%, #0c110e 100%);
+      color: var(--sp-text);
+      border: 1.5px solid var(--sp-border);
+      border-radius: 26px;
+      box-shadow: -16px 0 45px rgba(0, 0, 0, 0.8), 0 0 35px rgba(30, 215, 96, 0.14);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      box-sizing: border-box;
+      transform: translate3d(115%, 0, 0);
+      transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 320ms ease;
+      overflow: hidden;
+    }
+    .sp-ov * { box-sizing: border-box; }
+    .sp-ov.sp-open {
+      transform: translate3d(0, 0, 0);
+    }
 
-  /* ------------------------------------------------------------------ */
-  /*  Styles                                                             */
-  /* ------------------------------------------------------------------ */
-  var CSS = '' +
-    '.sp-ov{--sp-bg:#0e1310;--sp-panel:#17201a;--sp-line:#2a372e;--sp-text:#f1f5f2;--sp-dim:#9db0a3;--sp-accent:#1ed760;--sp-scale:1;' +
-    'position:fixed;inset:0;z-index:2147483000;display:none;flex-direction:column;background:var(--sp-bg);color:var(--sp-text);' +
-    'font:calc(16px*var(--sp-scale))/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;box-sizing:border-box}' +
-    '.sp-ov *{box-sizing:border-box}' +
-    '.sp-ov.sp-open{display:flex}' +
-    '.sp-ov.sp-tv{--sp-scale:1.35}' +
-    '.sp-ov button,.sp-ov input{font:inherit;color:inherit}' +
-    '.sp-ov :focus{outline:3px solid var(--sp-accent);outline-offset:2px}' +
-    '.sp-ov :focus:not(:focus-visible){outline:3px solid var(--sp-accent);outline-offset:2px}' +
-    '.sp-head{display:flex;align-items:center;gap:.75em;padding:.75em 1em;border-bottom:1px solid var(--sp-line)}' +
-    '.sp-title{flex:1;font-weight:700;font-size:1.15em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-    '.sp-btn{background:var(--sp-panel);border:1px solid var(--sp-line);border-radius:.6em;padding:.55em 1em;cursor:pointer;min-height:2.4em}' +
-    '.sp-btn:hover{border-color:var(--sp-accent)}' +
-    '.sp-btn.sp-primary{background:var(--sp-accent);border-color:var(--sp-accent);color:#04120a;font-weight:700}' +
-    '.sp-btn.sp-on{border-color:var(--sp-accent);box-shadow:inset 0 -3px 0 var(--sp-accent)}' +
-    '.sp-body{flex:1;overflow-y:auto;padding:1em;-webkit-overflow-scrolling:touch}' +
-    '.sp-row{display:flex;flex-wrap:wrap;gap:.5em;margin-bottom:.9em;align-items:center}' +
-    '.sp-input{flex:1;min-width:10em;background:var(--sp-panel);border:1px solid var(--sp-line);border-radius:.6em;padding:.6em .9em;min-height:2.6em}' +
-    '.sp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(calc(150px*var(--sp-scale)),1fr));gap:1em}' +
-    '.sp-card{display:flex;flex-direction:column;gap:.4em;text-align:left;background:var(--sp-panel);border:1px solid var(--sp-line);border-radius:.7em;padding:.6em;cursor:pointer}' +
-    '.sp-card:hover{border-color:var(--sp-accent)}' +
-    '.sp-cover{width:100%;aspect-ratio:1/1;border-radius:.45em;background:#223027 center/cover no-repeat;display:flex;align-items:center;justify-content:center;color:var(--sp-dim);font-size:2em}' +
-    '.sp-card.sp-artist .sp-cover{border-radius:50%}' +
-    '.sp-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}' +
-    '.sp-sub{color:var(--sp-dim);font-size:.85em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-    '.sp-msg{padding:2em 1em;text-align:center;color:var(--sp-dim)}' +
-    '.sp-msg strong{color:var(--sp-text)}' +
-    '.sp-err{color:#ff9b9b}' +
-    '.sp-more{display:block;margin:1.2em auto 0}' +
-    '.sp-player{border-top:1px solid var(--sp-line);padding:.6em 1em;background:var(--sp-panel);display:none}' +
-    '.sp-player.sp-show{display:block}' +
-    '.sp-player iframe{width:100%;border:0;border-radius:.7em;display:block}' +
-    '.sp-note{color:var(--sp-dim);font-size:.8em;margin-top:.4em}' +
-    '.sp-saved{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.5em}' +
-    '.sp-saved li{display:flex;gap:.5em}' +
-    '.sp-saved .sp-btn:first-child{flex:1;text-align:left}' +
-    '.sp-float{position:fixed;top:12px;right:12px;z-index:2147482000}' +
-    '@media (prefers-reduced-motion:no-preference){.sp-card,.sp-btn{transition:border-color .12s}}';
+    /* TV D-Pad Focus Ring inside drawer */
+    .sp-ov .sp-nav:focus,
+    .sp-ov .sp-nav.sp-focused {
+      outline: 3px solid var(--sp-accent) !important;
+      outline-offset: 2px !important;
+      border-color: var(--sp-accent) !important;
+      box-shadow: 0 0 20px var(--sp-glow) !important;
+      transform: scale(1.02);
+      z-index: 2;
+    }
+
+    /* Header */
+    .sp-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1vw;
+      padding: 1.8vh 1.4vw;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(18, 25, 20, 0.7);
+    }
+    .sp-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.8vw;
+    }
+    .sp-logo-svg {
+      width: 2.8vh;
+      height: 2.8vh;
+      fill: var(--sp-accent);
+    }
+    .sp-title {
+      font-size: 1.35rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      color: #fff;
+    }
+    .sp-head-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.6vw;
+    }
+    .sp-hint-pill {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--sp-dim);
+      background: rgba(255, 255, 255, 0.06);
+      padding: 0.3vh 0.6vw;
+      border-radius: 999px;
+      letter-spacing: 0.04em;
+    }
+    .sp-close-btn {
+      width: 4.2vh;
+      height: 4.2vh;
+      border-radius: 50%;
+      background: var(--sp-surface);
+      border: 1px solid var(--sp-border);
+      color: var(--sp-dim);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 1.2rem;
+      transition: all 180ms ease;
+    }
+
+    /* Scrollable Drawer Body */
+    .sp-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.8vh 1.4vw;
+      display: flex;
+      flex-direction: column;
+      gap: 1.8vh;
+      scrollbar-width: thin;
+      scrollbar-color: var(--sp-border) transparent;
+    }
+
+    /* Search input row */
+    .sp-search-row {
+      position: relative;
+      display: flex;
+      align-items: center;
+      width: 100%;
+    }
+    .sp-search-icon {
+      position: absolute;
+      left: 1vw;
+      width: 2vh;
+      height: 2vh;
+      fill: var(--sp-dim);
+      pointer-events: none;
+    }
+    .sp-input {
+      width: 100%;
+      background: var(--sp-surface);
+      border: 1.5px solid rgba(255, 255, 255, 0.1);
+      border-radius: 14px;
+      padding: 1.2vh 1vw 1.2vh 2.8vw;
+      color: #fff;
+      font-size: 0.95rem;
+      font-family: inherit;
+      transition: all 180ms ease;
+    }
+    .sp-input::placeholder {
+      color: var(--sp-dim);
+    }
+    .sp-input:focus {
+      border-color: var(--sp-accent);
+      background: #18221c;
+    }
+
+    /* Mood Chips */
+    .sp-chips-label {
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--sp-dim);
+    }
+    .sp-chips-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6vw 0.5vw;
+    }
+    .sp-chip {
+      background: var(--sp-surface);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--sp-text);
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 0.6vh 0.9vw;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: all 160ms ease;
+    }
+    .sp-chip:hover {
+      background: var(--sp-surface-hover);
+      border-color: var(--sp-accent);
+      color: #fff;
+    }
+
+    /* Playlist & Track Cards */
+    .sp-section-title {
+      font-size: 0.9rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .sp-cards-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1vh;
+    }
+    .sp-card {
+      display: flex;
+      align-items: center;
+      gap: 1vw;
+      background: var(--sp-surface);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 14px;
+      padding: 1vh 1vw;
+      cursor: pointer;
+      text-align: left;
+      transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
+    }
+    .sp-card:hover {
+      background: var(--sp-surface-hover);
+      border-color: var(--sp-border-hover);
+    }
+    .sp-card-thumb {
+      width: 5.6vh;
+      height: 5.6vh;
+      border-radius: 10px;
+      background: #1a241e;
+      object-fit: cover;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      flex-shrink: 0;
+    }
+    .sp-card-body {
+      flex: 1;
+      min-width: 0;
+    }
+    .sp-card-title {
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sp-card-sub {
+      font-size: 0.78rem;
+      color: var(--sp-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 0.2vh;
+    }
+    .sp-play-pill {
+      font-size: 0.75rem;
+      font-weight: 800;
+      background: rgba(30, 215, 96, 0.15);
+      color: var(--sp-accent);
+      border: 1px solid rgba(30, 215, 96, 0.3);
+      padding: 0.4vh 0.8vw;
+      border-radius: 999px;
+      flex-shrink: 0;
+    }
+
+    /* Embedded Player Container */
+    .sp-player-wrap {
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      background: #090e0b;
+      padding: 1.2vh 1.4vw;
+      display: none;
+    }
+    .sp-player-wrap.sp-active {
+      display: block;
+    }
+    .sp-player-frame {
+      width: 100%;
+      height: 152px;
+      border: 0;
+      border-radius: 16px;
+      background: #000;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    }
+
+    /* Info / Error Banner */
+    .sp-notice-box {
+      background: rgba(30, 215, 96, 0.08);
+      border: 1px solid rgba(30, 215, 96, 0.25);
+      border-radius: 14px;
+      padding: 1.4vh 1.2vw;
+      font-size: 0.82rem;
+      line-height: 1.4;
+      color: #d1ded5;
+    }
+    .sp-notice-box.sp-warn {
+      background: rgba(255, 170, 0, 0.08);
+      border-color: rgba(255, 170, 0, 0.3);
+      color: #ffdda1;
+    }
+    .sp-notice-title {
+      font-weight: 800;
+      font-size: 0.86rem;
+      margin-bottom: 0.4vh;
+      display: flex;
+      align-items: center;
+      gap: 0.4vw;
+    }
+
+    /* Direct link input bar */
+    .sp-link-row {
+      display: flex;
+      gap: 0.5vw;
+    }
+    .sp-btn-action {
+      background: var(--sp-accent);
+      color: #04120a;
+      border: 0;
+      font-weight: 800;
+      font-size: 0.85rem;
+      padding: 0 1.2vw;
+      border-radius: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+  `;
 
   function injectCss() {
     if (document.getElementById('sp-style')) return;
@@ -359,526 +629,532 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Overlay                                                            */
+  /*  Overlay State & UI                                                */
   /* ------------------------------------------------------------------ */
-  var S = { open: false, tab: 'search', type: 'track', stack: [], depth: 0, closing: false, reqId: 0 };
-  var el = {}; // dom refs
-  var searchTimer = null;
-  var lastFocus = null;
+  var S = {
+    open: false,
+    activeUri: null,
+    searchTimer: null
+  };
+  var dom = {};
+  var lastFocusedBeforeOpen = null;
 
-  var TYPES = [
-    { id: 'track', label: 'Songs' },
-    { id: 'artist', label: 'Artists' },
-    { id: 'album', label: 'Albums' },
-    { id: 'playlist', label: 'Playlists' }
-  ];
-
-  function build() {
-    if (el.root) return;
+  function buildDrawer() {
+    if (dom.root) return;
     injectCss();
 
-    el.title = h('div', { class: 'sp-title', text: 'Spotify' });
-    el.back = h('button', { class: 'sp-btn', type: 'button', 'aria-label': 'Back', text: 'Back', onclick: function () { history.back(); } });
-    el.close = h('button', { class: 'sp-btn', type: 'button', 'aria-label': 'Close Spotify', text: 'Close', onclick: requestClose });
-
-    // --- root (tabs + search + playlists) ---
-    el.tabSearch = h('button', { class: 'sp-btn', type: 'button', text: 'Search', onclick: function () { setTab('search'); } });
-    el.tabPlaylists = h('button', { class: 'sp-btn', type: 'button', text: 'Playlists', onclick: function () { setTab('playlists'); } });
-
-    el.input = h('input', { class: 'sp-input', type: 'search', placeholder: 'Song, artist, album or playlist', 'aria-label': 'Search Spotify', autocomplete: 'off' });
-    el.input.addEventListener('input', function () {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(runSearch, 500);
+    // Backdrop
+    dom.backdrop = h('div', {
+      class: 'sp-backdrop',
+      onclick: requestClose
     });
-    el.input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
-    });
-    el.typeBtns = TYPES.map(function (t) {
-      return h('button', { class: 'sp-btn', type: 'button', text: t.label, 'data-type': t.id, onclick: function () { S.type = t.id; markTypes(); runSearch(); } });
-    });
-    el.results = h('div');
-    el.searchPanel = h('div', null, [
-      h('div', { class: 'sp-row' }, [el.input]),
-      h('div', { class: 'sp-row' }, el.typeBtns),
-      el.results
-    ]);
 
-    el.plInput = h('input', { class: 'sp-input', type: 'text', placeholder: 'Paste a Spotify playlist link', 'aria-label': 'Playlist link', autocomplete: 'off' });
-    el.plInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') openPlaylistFromInput(); });
-    el.plMsg = h('div', { class: 'sp-msg sp-err', style: 'display:none;padding:.4em 0;text-align:left' });
-    el.savedBox = h('ul', { class: 'sp-saved' });
-    el.playlistsPanel = h('div', { style: 'display:none' }, [
-      h('div', { class: 'sp-row' }, [el.plInput, h('button', { class: 'sp-btn sp-primary', type: 'button', text: 'Open', onclick: openPlaylistFromInput })]),
-      el.plMsg,
-      h('div', { class: 'sp-name', text: 'Saved playlists', style: 'margin:1em 0 .5em' }),
-      el.savedBox
-    ]);
+    // Drawer Container
+    dom.root = h('div', { class: 'sp-ov' });
 
-    el.rootBox = h('div', null, [
-      h('div', { class: 'sp-row' }, [el.tabSearch, el.tabPlaylists]),
-      el.searchPanel,
-      el.playlistsPanel
-    ]);
-    el.viewBox = h('div', { style: 'display:none' });
-    el.authBox = h('div', { style: 'display:none' });
-
-    el.body = h('div', { class: 'sp-body' }, [el.rootBox, el.viewBox, el.authBox]);
-
-    el.playerFrameBox = h('div');
-    el.player = h('div', { class: 'sp-player' }, [
-      el.playerFrameBox,
-      h('div', { class: 'sp-row', style: 'margin:.5em 0 0' }, [
-        h('button', { class: 'sp-btn', type: 'button', text: 'Stop player', onclick: stopPlayer }),
-        h('a', { class: 'sp-btn', id: 'sp-open-link', href: '#', target: '_blank', rel: 'noopener', text: 'Open in Spotify', style: 'text-decoration:none' })
+    // Header
+    dom.head = h('div', { class: 'sp-head' }, [
+      h('div', { class: 'sp-brand' }, [
+        h('svg', { class: 'sp-logo-svg', viewBox: '0 0 24 24', html: '<path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.586 14.424a.623.623 0 01-.857.207c-2.348-1.435-5.304-1.76-8.785-.964a.625.625 0 01-.277-1.22c3.807-.87 7.075-.497 9.712 1.12a.624.624 0 01.207.857zm1.224-2.719a.78.78 0 01-1.073.257c-2.688-1.652-6.785-2.131-9.964-1.166a.78.78 0 01-.453-1.493c3.629-1.102 8.147-.57 11.233 1.329a.78.78 0 01.257 1.073zm.105-2.835C14.693 8.948 9.387 8.77 6.309 9.704a.936.936 0 11-.546-1.79c3.528-1.071 9.39-.864 13.167 1.378a.936.936 0 01-.245 1.578z"/>' }),
+        h('span', { class: 'sp-title', text: 'Spotify Music' })
       ]),
-      h('div', { class: 'sp-note', text: 'Full songs play when you are signed in to Spotify in this app. Otherwise you hear previews.' })
+      h('div', { class: 'sp-head-actions' }, [
+        h('span', { class: 'sp-hint-pill', text: 'BACK to exit' }),
+        h('button', {
+          class: 'sp-close-btn sp-nav',
+          type: 'button',
+          'aria-label': 'Close Spotify',
+          html: '✕',
+          onclick: requestClose
+        })
+      ])
     ]);
 
-    el.root = h('div', { class: 'sp-ov', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Spotify' }, [
-      h('div', { class: 'sp-head' }, [el.back, el.title, el.close]),
-      el.body,
-      el.player
-    ]);
-    document.body.appendChild(el.root);
+    // Body
+    dom.body = h('div', { class: 'sp-body' });
 
-    el.root.addEventListener('keydown', onKey, true);
-    markTypes();
-    renderSaved();
-  }
-
-  function markTypes() {
-    el.typeBtns.forEach(function (b) {
-      b.classList.toggle('sp-on', b.getAttribute('data-type') === S.type);
+    // Search bar
+    dom.searchInput = h('input', {
+      class: 'sp-input sp-nav',
+      type: 'search',
+      placeholder: 'Search song, artist, playlist...',
+      'aria-label': 'Search Spotify',
+      autocomplete: 'off'
     });
-  }
-
-  function setTab(tab) {
-    S.tab = tab;
-    el.searchPanel.style.display = tab === 'search' ? '' : 'none';
-    el.playlistsPanel.style.display = tab === 'playlists' ? '' : 'none';
-    el.tabSearch.classList.toggle('sp-on', tab === 'search');
-    el.tabPlaylists.classList.toggle('sp-on', tab === 'playlists');
-  }
-
-  /* ---------- history integration so the Android Back button works ---------- */
-  function pushHistory() {
-    try { history.pushState({ spotify: true }, ''); S.depth++; } catch (e) { /* ignore */ }
-  }
-
-  window.addEventListener('popstate', function () {
-    if (!S.open) return;
-    if (S.closing) { S.closing = false; S.depth = 0; hide(); return; }
-    if (S.depth > 0) S.depth--;
-    if (S.stack.length > 0) { S.stack.pop(); renderStack(); return; }
-    hide();
-  });
-
-  function requestClose() {
-    if (S.depth > 1) { S.closing = true; try { history.go(-(S.depth - 1)); } catch (e) { hide(); } }
-    else if (S.depth === 1) { history.back(); }
-    else hide();
-  }
-
-  /* ---------- open / close ---------- */
-  function open() {
-    build();
-    lastFocus = document.activeElement;
-    el.root.classList.toggle('sp-tv', isTV());
-    el.root.classList.add('sp-open');
-    S.open = true;
-    S.stack = [];
-    S.depth = 0;
-    if (window.Focus && window.Focus.hideFocusRing) window.Focus.hideFocusRing();
-    pushHistory();
-    renderStack();
-  }
-
-  function hide() {
-    if (!el.root) return;
-    clearTimeout(searchTimer);
-    stopPlayer();
-    el.root.classList.remove('sp-open');
-    S.open = false;
-    S.stack = [];
-    S.depth = 0;
-    if (window.Focus && window.Focus.showFocusRing) window.Focus.showFocusRing();
-    try {
-      if (lastFocus && lastFocus.focus) lastFocus.focus();
-      if (window.Focus && lastFocus && window.Focus.setFocus) window.Focus.setFocus(lastFocus);
-    } catch (e) { /* ignore */ }
-  }
-
-  function renderStack() {
-    var top = S.stack[S.stack.length - 1];
-    el.back.style.display = S.stack.length ? '' : 'none';
-    if (!top) {
-      el.title.textContent = 'Spotify';
-      el.viewBox.style.display = 'none';
-      if (needsAuth()) { showAuth(); return; }
-      el.authBox.style.display = 'none';
-      el.rootBox.style.display = '';
-      setTab(S.tab);
-      focusFirst();
-      return;
-    }
-    el.rootBox.style.display = 'none';
-    el.authBox.style.display = 'none';
-    el.viewBox.style.display = '';
-    el.title.textContent = top.title;
-    el.viewBox.textContent = '';
-    if (top.embed) {
-      var row = h('div', { class: 'sp-row' }, [
-        h('button', { class: 'sp-btn sp-primary', type: 'button', text: 'Play', onclick: function () { play(top.embed.type, top.embed.id); } })
-      ]);
-      if (top.embed.type === 'playlist') {
-        row.appendChild(h('button', { class: 'sp-btn', type: 'button', text: 'Save playlist', onclick: function (e) { savePlaylist(top.embed.id, top.title, e.currentTarget); } }));
-      }
-      el.viewBox.appendChild(row);
-    }
-    var listBox = h('div');
-    el.viewBox.appendChild(listBox);
-    paginate(listBox, top.fetcher);
-    focusFirst();
-  }
-
-  function pushView(view) {
-    S.stack.push(view);
-    pushHistory();
-    renderStack();
-  }
-
-  function focusFirst() {
-    setTimeout(function () {
-      if (!S.open) return;
-      var target = S.stack.length ? el.viewBox.querySelector('button') : (S.tab === 'search' ? el.input : el.plInput);
-      if (target && target.focus) try { target.focus(); } catch (e) { /* ignore */ }
-    }, 30);
-  }
-
-  /* ---------- auth screen ---------- */
-  function needsAuth() {
-    return clientIdMissing() || !hasSession();
-  }
-
-  function showAuth(message) {
-    el.rootBox.style.display = 'none';
-    el.viewBox.style.display = 'none';
-    el.authBox.style.display = '';
-    el.authBox.textContent = '';
-    var loginErr = lsGet('sp_login_error');
-    if (loginErr) lsDel('sp_login_error');
-
-    if (clientIdMissing()) {
-      el.authBox.appendChild(h('div', { class: 'sp-msg' }, [
-        h('p', null, [h('strong', { text: 'Spotify is not set up yet.' })]),
-        h('p', { text: 'Add your Client ID to CONFIG.CLIENT_ID in spotify-overlay.js, then reload the page.' })
-      ]));
-      return;
-    }
-    var box = h('div', { class: 'sp-msg' }, [
-      h('p', null, [h('strong', { text: 'Connect Spotify to search and browse.' })]),
-      message ? h('p', { class: 'sp-err', text: message }) : null,
-      loginErr ? h('p', { class: 'sp-err', text: 'Login failed: ' + loginErr }) : null
-    ]);
-    var btn = h('button', { class: 'sp-btn sp-primary', type: 'button', text: 'Connect Spotify', onclick: function () {
-      startLogin().catch(function (e) { showAuth(e.message); });
-    } });
-    box.appendChild(btn);
-    el.authBox.appendChild(box);
-    setTimeout(function () { try { btn.focus(); } catch (e) { /* ignore */ } }, 30);
-  }
-
-  function handleApiError(e, container) {
-    if (e && e.message === 'AUTH_REQUIRED') { S.stack = []; showAuth('Your Spotify session expired. Connect again.'); return; }
-    container.textContent = '';
-    container.appendChild(h('div', { class: 'sp-msg' }, [
-      h('p', { class: 'sp-err', text: (e && e.message) || 'Something went wrong.' }),
-      h('button', { class: 'sp-btn', type: 'button', text: 'Try again', onclick: function () { if (container.__retry) container.__retry(); } })
-    ]));
-  }
-
-  /* ---------- paginated list ---------- */
-  function paginate(container, fetcher) {
-    var st = { offset: 0, total: null, items: [], busy: false };
-    var myReq = ++S.reqId;
-    var grid = h('div', { class: 'sp-grid' });
-    var footer = h('div');
-    container.textContent = '';
-    container.appendChild(grid);
-    container.appendChild(footer);
-
-    function more() {
-      if (st.busy) return;
-      st.busy = true;
-      footer.textContent = '';
-      footer.appendChild(h('div', { class: 'sp-msg', text: 'Loading…' }));
-      fetcher(st.offset).then(function (res) {
-        if (myReq !== S.reqId && !S.stack.length) return; // stale search
-        st.busy = false;
-        st.total = res.total;
-        st.offset += res.raw;
-        res.items.forEach(function (it) { grid.appendChild(card(it)); });
-        st.items = st.items.concat(res.items);
-        footer.textContent = '';
-        if (!st.items.length) {
-          footer.appendChild(h('div', { class: 'sp-msg', text: 'Nothing found.' }));
-        } else if (res.raw > 0 && st.offset < st.total) {
-          footer.appendChild(h('button', { class: 'sp-btn sp-more', type: 'button', text: 'Load more', onclick: more }));
-        }
-      }).catch(function (e) {
-        st.busy = false;
-        footer.textContent = '';
-        container.__retry = more;
-        handleApiError(e, footer);
-      });
-    }
-    more();
-  }
-
-  function card(item) {
-    var cover = h('div', { class: 'sp-cover' });
-    if (item.img) cover.style.backgroundImage = 'url("' + item.img.replace(/"/g, '%22') + '")';
-    else cover.textContent = '♪';
-    return h('button', { class: 'sp-card sp-' + item.type, type: 'button', onclick: function () { onItem(item); } }, [
-      cover,
-      h('div', { class: 'sp-name', text: item.name || '' }),
-      h('div', { class: 'sp-sub', text: item.sub || '' })
-    ]);
-  }
-
-  function onItem(item) {
-    if (item.type === 'track') { play('track', item.id); return; }
-    if (item.type === 'artist') {
-      pushView({ title: item.name, embed: { type: 'artist', id: item.id }, fetcher: function (o) { return artistAlbums(item.id, o); } });
-    } else if (item.type === 'album') {
-      pushView({ title: item.name, embed: { type: 'album', id: item.id }, fetcher: function (o) { return albumTracks(item.id, o); } });
-    } else if (item.type === 'playlist') {
-      pushView({ title: item.name, embed: { type: 'playlist', id: item.id }, fetcher: function (o) { return playlistTracks(item.id, o); } });
-    }
-  }
-
-  /* ---------- search ---------- */
-  function runSearch() {
-    var q = el.input.value.trim();
-    if (!q) { el.results.textContent = ''; return; }
-    var type = S.type;
-    var listBox = h('div');
-    el.results.textContent = '';
-    el.results.appendChild(listBox);
-    paginate(listBox, function (offset) { return search(q, type, offset); });
-  }
-
-  /* ---------- playlists tab ---------- */
-  function openPlaylistFromInput() {
-    var id = parseSpotifyId(el.plInput.value, 'playlist');
-    el.plMsg.style.display = 'none';
-    if (!id) {
-      el.plMsg.textContent = 'That does not look like a Spotify playlist link.';
-      el.plMsg.style.display = '';
-      return;
-    }
-    openPlaylist(id, 'Playlist');
-    playlistMeta(id).then(function (name) {
-      var top = S.stack[S.stack.length - 1];
-      if (top && top.embed && top.embed.id === id) { top.title = name; el.title.textContent = name; }
-    }).catch(function () { /* title stays generic */ });
-  }
-
-  function openPlaylist(id, title) {
-    pushView({ title: title, embed: { type: 'playlist', id: id }, fetcher: function (o) { return playlistTracks(id, o); } });
-  }
-
-  function getSaved() { return lsJson('sp_saved', []); }
-
-  function savePlaylist(id, name, btn) {
-    var list = getSaved().filter(function (p) { return p.id !== id; });
-    list.unshift({ id: id, name: name || 'Playlist' });
-    lsSet('sp_saved', JSON.stringify(list.slice(0, 50)));
-    renderSaved();
-    if (btn) btn.textContent = 'Saved';
-  }
-
-  function renderSaved() {
-    var list = getSaved();
-    el.savedBox.textContent = '';
-    if (!list.length) {
-      el.savedBox.appendChild(h('li', { class: 'sp-sub', text: 'No saved playlists yet. Open one and choose Save playlist.' }));
-      return;
-    }
-    list.forEach(function (p) {
-      el.savedBox.appendChild(h('li', null, [
-        h('button', { class: 'sp-btn', type: 'button', text: p.name, onclick: function () { openPlaylist(p.id, p.name); } }),
-        h('button', { class: 'sp-btn', type: 'button', 'aria-label': 'Remove ' + p.name, text: 'Remove', onclick: function () {
-          lsSet('sp_saved', JSON.stringify(getSaved().filter(function (x) { return x.id !== p.id; })));
-          renderSaved();
-        } })
-      ]));
-    });
-  }
-
-  /* ---------- embed player ---------- */
-  function play(type, id) {
-    var height = type === 'track' ? 152 : 232;
-    el.playerFrameBox.textContent = '';
-    var frame = h('iframe', {
-      src: 'https://open.spotify.com/embed/' + type + '/' + id + '?theme=0',
-      height: String(height),
-      allow: 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture',
-      loading: 'lazy',
-      title: 'Spotify player'
-    });
-    el.playerFrameBox.appendChild(frame);
-    var link = el.player.querySelector('#sp-open-link');
-    if (link) link.href = 'https://open.spotify.com/' + type + '/' + id;
-    el.player.classList.add('sp-show');
-  }
-
-  function stopPlayer() {
-    if (!el.player) return;
-    el.playerFrameBox.textContent = '';
-    el.player.classList.remove('sp-show');
-  }
-
-  /* ---------- remote control: arrow-key spatial navigation ---------- */
-  function visible(e) {
-    if (e.disabled) return false;
-    var r = e.getBoundingClientRect();
-    if (!r.width || !r.height) return false;
-    return e.offsetParent !== null || getComputedStyle(e).position === 'fixed';
-  }
-
-  function onKey(e) {
-    var k = e.key;
-    if (k === 'Escape' || k === 'BrowserBack' || k === 'GoBack') {
-      e.preventDefault(); e.stopPropagation();
-      history.back();
-      return;
-    }
-    var dir = { ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right' }[k];
-    if (!dir) return;
-    var cur = document.activeElement;
-    // let the caret move inside text fields on left/right
-    if (cur && cur.tagName === 'INPUT' && (dir === 'Left' || dir === 'Right')) return;
-    var nodes = [].slice.call(el.root.querySelectorAll('button,input,a[href]')).filter(visible);
-    if (!cur || !el.root.contains(cur) || cur === el.root || cur.tagName === 'IFRAME') {
-      if (nodes[0]) { e.preventDefault(); nodes[0].focus(); }
-      return;
-    }
-    var r = cur.getBoundingClientRect();
-    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    var best = null, bestScore = Infinity;
-    nodes.forEach(function (n) {
-      if (n === cur) return;
-      var q = n.getBoundingClientRect();
-      var dx = q.left + q.width / 2 - cx, dy = q.top + q.height / 2 - cy;
-      var main, cross;
-      if (dir === 'Right') { if (dx <= 1) return; main = dx; cross = Math.abs(dy); }
-      else if (dir === 'Left') { if (dx >= -1) return; main = -dx; cross = Math.abs(dy); }
-      else if (dir === 'Down') { if (dy <= 1) return; main = dy; cross = Math.abs(dx); }
-      else { if (dy >= -1) return; main = -dy; cross = Math.abs(dx); }
-      var score = main + cross * 2;
-      if (score < bestScore) { bestScore = score; best = n; }
-    });
-    if (best) {
-      e.preventDefault();
-      best.focus();
-      try { best.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (err) { /* ignore */ }
-    }
-  }
-
-  /* ------------------------------------------------------------------ */
-  /*  Header button                                                      */
-  /* ------------------------------------------------------------------ */
-  var btnEl = null;
-
-  function findReference() {
-    if (CONFIG.BUTTON_SELECTOR) {
-      var forced = document.querySelector(CONFIG.BUTTON_SELECTOR);
-      if (forced) return forced;
-    }
-    var re = /(setting|settings|profile|profil|param|réglage|reglage|account|compte)/i;
-    var cands = document.querySelectorAll('button,a,[role="button"],[onclick],li,div,span');
-    for (var i = 0; i < cands.length; i++) {
-      var c = cands[i];
-      if (c.closest && c.closest('.sp-ov')) continue;
-      if (c.children.length > 4) continue; // skip big containers
-      var label = [c.id, typeof c.className === 'string' ? c.className : '', c.getAttribute('aria-label') || '', c.title || '', (c.textContent || '').trim().slice(0, 24)].join(' ');
-      if (re.test(label) && visible(c)) return c;
-    }
-    return null;
-  }
-
-  function makeButtonLike(ref) {
-    var b = ref.cloneNode(false);
-    b.removeAttribute('id');
-    b.removeAttribute('onclick');
-    b.removeAttribute('href');
-    b.removeAttribute('name');
-    b.setAttribute('data-sp-btn', '1');
-    b.setAttribute('aria-label', 'Spotify');
-    b.setAttribute('title', 'Spotify');
-    b.setAttribute('role', 'button');
-    b.setAttribute('tabindex', '0');
-    var iconOnly = !(ref.textContent || '').trim();
-    b.textContent = iconOnly ? '♫' : '♫ Spotify';
-    b.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); open(); });
-    b.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
-    return b;
-  }
-
-  function placeButton() {
-    var existing = document.getElementById('dash-spotify-btn');
-    if (existing) {
-      btnEl = existing;
-      if (!existing.__spBound) {
-        existing.__spBound = true;
-        existing.addEventListener('click', function (e) {
-          e.preventDefault();
-          e.stopPropagation();
-          open();
+    dom.searchInput.addEventListener('input', onSearchInput);
+    dom.searchInput.addEventListener('click', function () {
+      if (window.VirtualKeyboard && typeof window.VirtualKeyboard.open === 'function') {
+        window.VirtualKeyboard.open({
+          type: 'text',
+          initialValue: dom.searchInput.value,
+          onComplete: function (val) {
+            if (val != null) {
+              dom.searchInput.value = val;
+              runSearch(val);
+            }
+          }
         });
       }
-      return true;
+    });
+
+    var searchRow = h('div', { class: 'sp-search-row' }, [
+      h('svg', { class: 'sp-search-icon', viewBox: '0 0 24 24', html: '<path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>' }),
+      dom.searchInput
+    ]);
+
+    // Moods row
+    var moodChips = QUICK_MOODS.map(function (m) {
+      return h('button', {
+        class: 'sp-chip sp-nav',
+        type: 'button',
+        text: m.label,
+        onclick: function () {
+          dom.searchInput.value = m.query;
+          runSearch(m.query);
+        }
+      });
+    });
+
+    var moodsSection = h('div', null, [
+      h('div', { class: 'sp-chips-label', text: 'Workout & Running Vibes', style: 'margin-bottom: 0.8vh;' }),
+      h('div', { class: 'sp-chips-row' }, moodChips)
+    ]);
+
+    // Direct link input row
+    dom.linkInput = h('input', {
+      class: 'sp-input sp-nav',
+      type: 'text',
+      placeholder: 'Or paste Spotify link (playlist / track / album)...',
+      style: 'font-size: 0.85rem;'
+    });
+    dom.linkInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') handleDirectLink();
+    });
+    var linkRow = h('div', { class: 'sp-link-row' }, [
+      dom.linkInput,
+      h('button', {
+        class: 'sp-btn-action sp-nav',
+        type: 'button',
+        text: 'Play',
+        onclick: handleDirectLink
+      })
+    ]);
+
+    // Results container
+    dom.resultsBox = h('div', { class: 'sp-cards-list' });
+
+    // Featured Curated Section
+    dom.curatedSection = h('div', null, [
+      h('div', { class: 'sp-section-title', text: 'Featured TV Mat Playlists' }),
+      h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' }, renderCuratedCards())
+    ]);
+
+    // Notice box for 403 or auth
+    dom.noticeBox = h('div', { class: 'sp-notice-box', style: 'display: none;' });
+
+    // Assemble body
+    dom.body.appendChild(searchRow);
+    dom.body.appendChild(moodsSection);
+    dom.body.appendChild(linkRow);
+    dom.body.appendChild(dom.noticeBox);
+    dom.body.appendChild(dom.resultsBox);
+    dom.body.appendChild(dom.curatedSection);
+
+    // Bottom Embedded Player Wrap
+    dom.playerWrap = h('div', { class: 'sp-player-wrap' });
+    dom.playerFrame = h('iframe', {
+      class: 'sp-player-frame',
+      allow: 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture',
+      loading: 'lazy'
+    });
+    dom.playerWrap.appendChild(dom.playerFrame);
+
+    // Assemble Root
+    dom.root.appendChild(dom.head);
+    dom.root.appendChild(dom.body);
+    dom.root.appendChild(dom.playerWrap);
+
+    document.body.appendChild(dom.backdrop);
+    document.body.appendChild(dom.root);
+
+    // Attach TV input listener
+    setupInputListener();
+  }
+
+  function renderCuratedCards() {
+    return CURATED_PLAYLISTS.map(function (p) {
+      return h('div', {
+        class: 'sp-card sp-nav',
+        tabindex: '0',
+        role: 'button',
+        onclick: function () { playEmbed(p.type, p.id); }
+      }, [
+        h('img', {
+          class: 'sp-card-thumb',
+          src: p.cover,
+          alt: p.title,
+          onerror: function () { this.style.display = 'none'; }
+        }),
+        h('div', { class: 'sp-card-body' }, [
+          h('div', { class: 'sp-card-title', text: p.icon + ' ' + p.title }),
+          h('div', { class: 'sp-card-sub', text: p.sub })
+        ]),
+        h('div', { class: 'sp-play-pill', text: '▶ PLAY' })
+      ]);
+    });
+  }
+
+  function playEmbed(type, id) {
+    if (!dom.playerWrap || !dom.playerFrame) return;
+    var embedUrl = 'https://open.spotify.com/embed/' + encodeURIComponent(type) + '/' + encodeURIComponent(id) + '?utm_source=generator&theme=0';
+    dom.playerFrame.src = embedUrl;
+    dom.playerWrap.classList.add('sp-active');
+
+    if (window.Notify) {
+      window.Notify.show({
+        type: 'success',
+        title: 'Spotify Player',
+        message: 'Loaded ' + type + ' into player',
+        duration: 3000
+      });
     }
-    return false;
+
+    // Scroll player into view
+    setTimeout(function () {
+      dom.playerWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 200);
   }
 
-  function ensureButton() {
-    var timer = setInterval(function () {
-      if (placeButton()) { clearInterval(timer); watchButton(); }
-    }, 500);
-    if (placeButton()) { clearInterval(timer); watchButton(); }
+  function handleDirectLink() {
+    var val = dom.linkInput ? dom.linkInput.value : '';
+    var parsed = parseSpotifyUrl(val);
+    if (parsed) {
+      playEmbed(parsed.type, parsed.id);
+      dom.linkInput.value = '';
+    } else {
+      showNotice('Please enter a valid Spotify playlist or track URL (e.g. open.spotify.com/playlist/...)', true);
+    }
   }
 
-  // If the page re-renders its header and drops our button, put it back.
-  function watchButton() {
+  function onSearchInput() {
+    clearTimeout(S.searchTimer);
+    var q = dom.searchInput ? dom.searchInput.value.trim() : '';
+    if (!q) {
+      dom.resultsBox.innerHTML = '';
+      dom.noticeBox.style.display = 'none';
+      dom.curatedSection.style.display = '';
+      return;
+    }
+    S.searchTimer = setTimeout(function () {
+      runSearch(q);
+    }, 450);
+  }
+
+  function runSearch(query) {
+    if (!query) return;
+    dom.resultsBox.innerHTML = '<div style="padding: 2vh 0; text-align: center; color: var(--sp-dim);">Searching Spotify...</div>';
+
+    // Check if user has session or token
+    api('/search?q=' + encodeURIComponent(query) + '&type=track,playlist&limit=' + CONFIG.PAGE_SIZE)
+      .then(function (res) {
+        dom.curatedSection.style.display = 'none';
+        dom.noticeBox.style.display = 'none';
+        renderSearchResults(res);
+      })
+      .catch(function (err) {
+        console.warn('[Spotify Overlay] Search error:', err);
+        handleSearchError(err, query);
+      });
+  }
+
+  function handleSearchError(err, query) {
+    dom.resultsBox.innerHTML = '';
+    dom.curatedSection.style.display = '';
+
+    if (err && (err.message === '403_DEV_MODE' || err.message.indexOf('403') !== -1)) {
+      showNotice(
+        '<strong>Spotify Developer Mode (Error 403)</strong><br>' +
+        'Spotify requires registering your Spotify account email under <em>"Users and Access"</em> inside your <a href="https://developer.spotify.com/dashboard" target="_blank" style="color: #1ed760; text-decoration: underline;">Spotify Developer Dashboard</a>.<br><br>' +
+        '👉 <strong>Ready to Play:</strong> You can still play all featured running and workout playlists below with 1 click, or paste any Spotify link directly!',
+        true
+      );
+    } else if (err && err.message === 'AUTH_REQUIRED') {
+      showNotice(
+        '<strong>Spotify Login Required</strong><br>' +
+        'Connect your Spotify account to search tracks.<br>' +
+        '<button type="button" class="sp-btn-action sp-nav" style="margin-top: 1vh; padding: 0.8vh 1.4vw;" onclick="window.SpotifyOverlay.login()">Connect with Spotify</button>',
+        false
+      );
+    } else {
+      showNotice('Spotify Search: ' + ((err && err.message) || 'Error searching catalog') + '. Please try the curated workout playlists below.', true);
+    }
+  }
+
+  function showNotice(html, isWarn) {
+    if (!dom.noticeBox) return;
+    dom.noticeBox.className = 'sp-notice-box' + (isWarn ? ' sp-warn' : '');
+    dom.noticeBox.innerHTML = html;
+    dom.noticeBox.style.display = '';
+  }
+
+  function renderSearchResults(data) {
+    var items = [];
+    if (data.tracks && data.tracks.items) {
+      items = items.concat(data.tracks.items.map(function (t) {
+        var artist = t.artists && t.artists[0] ? t.artists[0].name : 'Artist';
+        var img = t.album && t.album.images && t.album.images[0] ? t.album.images[0].url : '';
+        return { type: 'track', id: t.id, title: t.name, sub: artist, img: img, icon: '🎵' };
+      }));
+    }
+    if (data.playlists && data.playlists.items) {
+      items = items.concat(data.playlists.items.filter(Boolean).map(function (p) {
+        var img = p.images && p.images[0] ? p.images[0].url : '';
+        return { type: 'playlist', id: p.id, title: p.name, sub: 'Playlist · ' + (p.owner ? p.owner.display_name : 'Spotify'), img: img, icon: '💿' };
+      }));
+    }
+
+    if (!items.length) {
+      dom.resultsBox.innerHTML = '<div style="padding: 2vh 0; text-align: center; color: var(--sp-dim);">No results found. Try another query or select a workout vibe above.</div>';
+      return;
+    }
+
+    dom.resultsBox.innerHTML = '';
+    var header = h('div', { class: 'sp-section-title', text: 'Search Results' });
+    dom.resultsBox.appendChild(header);
+
+    var list = h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' });
+    items.forEach(function (item) {
+      var card = h('div', {
+        class: 'sp-card sp-nav',
+        tabindex: '0',
+        role: 'button',
+        onclick: function () { playEmbed(item.type, item.id); }
+      }, [
+        item.img ? h('img', { class: 'sp-card-thumb', src: item.img, alt: item.title, onerror: function () { this.style.display = 'none'; } }) : h('div', { class: 'sp-card-thumb', text: item.icon }),
+        h('div', { class: 'sp-card-body' }, [
+          h('div', { class: 'sp-card-title', text: item.title }),
+          h('div', { class: 'sp-card-sub', text: item.sub })
+        ]),
+        h('div', { class: 'sp-play-pill', text: '▶ PLAY' })
+      ]);
+      list.appendChild(card);
+    });
+    dom.resultsBox.appendChild(list);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  TV Remote Navigation Engine                                        */
+  /* ------------------------------------------------------------------ */
+  function getNavElements() {
+    if (!dom.root) return [];
+    var all = Array.from(dom.root.querySelectorAll('.sp-nav:not([disabled])'));
+    return all.filter(function (el) {
+      if (!el.offsetParent && getComputedStyle(el).position !== 'fixed') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+  }
+
+  function navigateDpad(dir) {
+    var items = getNavElements();
+    if (!items.length) return;
+
+    var cur = document.activeElement;
+    if (!cur || !dom.root.contains(cur)) {
+      items[0].focus();
+      return;
+    }
+
+    var r = cur.getBoundingClientRect();
+    var cx = r.left + r.width / 2;
+    var cy = r.top + r.height / 2;
+
+    var best = null;
+    var bestScore = Infinity;
+
+    items.forEach(function (target) {
+      if (target === cur) return;
+      var tr = target.getBoundingClientRect();
+      var tcx = tr.left + tr.width / 2;
+      var tcy = tr.top + tr.height / 2;
+
+      var dx = tcx - cx;
+      var dy = tcy - cy;
+
+      var main = 0, cross = 0;
+      if (dir === 'Up') {
+        if (dy >= -2) return;
+        main = -dy;
+        cross = Math.abs(dx);
+      } else if (dir === 'Down') {
+        if (dy <= 2) return;
+        main = dy;
+        cross = Math.abs(dx);
+      } else if (dir === 'Left') {
+        if (dx >= -2) return;
+        main = -dx;
+        cross = Math.abs(dy);
+      } else if (dir === 'Right') {
+        if (dx <= 2) return;
+        main = dx;
+        cross = Math.abs(dy);
+      }
+
+      var score = main + cross * 2.2;
+      if (score < bestScore) {
+        bestScore = score;
+        best = target;
+      }
+    });
+
+    if (best) {
+      best.focus();
+      try {
+        best.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+      } catch (e) {}
+    }
+  }
+
+  function setupInputListener() {
+    if (window.Input && window.Input.addListener) {
+      window.Input.addListener(function (action) {
+        if (!S.open) return;
+
+        if (action === window.Input.ACTIONS.BACK) {
+          requestClose();
+          return;
+        }
+
+        if (action === window.Input.ACTIONS.OK) {
+          var cur = document.activeElement;
+          if (cur && dom.root.contains(cur) && cur !== dom.searchInput && cur !== dom.linkInput) {
+            cur.click();
+          }
+          return;
+        }
+
+        var dirMap = {
+          UP: 'Up',
+          DOWN: 'Down',
+          LEFT: 'Left',
+          RIGHT: 'Right'
+        };
+        if (dirMap[action]) {
+          navigateDpad(dirMap[action]);
+        }
+      });
+    }
+
+    // Fallback standard keyboard listener
+    window.addEventListener('keydown', function (e) {
+      if (!S.open) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        requestClose();
+        return;
+      }
+      var map = { ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right' };
+      if (map[e.key]) {
+        var activeTag = document.activeElement ? document.activeElement.tagName : '';
+        if (activeTag === 'INPUT' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+          return; // Let typing caret move
+        }
+        e.preventDefault();
+        navigateDpad(map[e.key]);
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Public Open & Close Controls                                      */
+  /* ------------------------------------------------------------------ */
+  function open() {
+    buildDrawer();
+    lastFocusedBeforeOpen = document.activeElement;
+
+    dom.backdrop.classList.add('sp-open');
+    dom.root.classList.add('sp-open');
+    S.open = true;
+
+    if (window.Focus && window.Focus.hideFocusRing) {
+      window.Focus.hideFocusRing();
+    }
+
+    // Default focus to search bar or first curated card
+    setTimeout(function () {
+      if (dom.searchInput) dom.searchInput.focus();
+    }, 250);
+  }
+
+  function requestClose() {
+    if (!S.open || !dom.root) return;
+    dom.root.classList.remove('sp-open');
+    if (dom.backdrop) dom.backdrop.classList.remove('sp-open');
+    S.open = false;
+
+    if (window.Focus && window.Focus.showFocusRing) {
+      window.Focus.showFocusRing();
+    }
+
+    setTimeout(function () {
+      if (lastFocusedBeforeOpen && lastFocusedBeforeOpen.focus) {
+        lastFocusedBeforeOpen.focus();
+        if (window.Focus && window.Focus.setFocus) {
+          window.Focus.setFocus(lastFocusedBeforeOpen);
+        }
+      }
+    }, 180);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Top Bar Button Binding                                            */
+  /* ------------------------------------------------------------------ */
+  function bindHeaderButton() {
+    var btn = document.getElementById('dash-spotify-btn');
+    if (btn && !btn.__spBound) {
+      btn.__spBound = true;
+      btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        open();
+      });
+    }
+  }
+
+  // Observe DOM for mainScreen rendering to bind button
+  function watchHeaderButton() {
+    bindHeaderButton();
     if (!window.MutationObserver) return;
-    var pending = false;
     new MutationObserver(function () {
-      if (pending) return;
-      pending = true;
-      setTimeout(function () {
-        pending = false;
-        if (!btnEl || !document.body.contains(btnEl)) placeButton();
-      }, 400);
+      bindHeaderButton();
     }).observe(document.body, { childList: true, subtree: true });
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Boot                                                               */
+  /*  Bootstrap & Exports                                               */
   /* ------------------------------------------------------------------ */
-  window.SpotifyOverlay = { open: open, close: requestClose, config: CONFIG };
+  window.SpotifyOverlay = {
+    open: open,
+    close: requestClose,
+    isOpen: function () { return S.open; },
+    play: playEmbed,
+    login: startLogin,
+    config: CONFIG
+  };
 
   function boot() {
     handleRedirect().then(function () {
-      ensureButton();
+      watchHeaderButton();
       if (lsGet('sp_reopen') === '1') {
         lsDel('sp_reopen');
-        setTimeout(open, 300);
+        setTimeout(open, 350);
       }
     });
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-  else boot();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
 })();

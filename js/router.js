@@ -176,6 +176,12 @@ window.Router = (function () {
   }
 
   function handleBack() {
+    // 0. If Spotify Overlay is open, close it
+    if (window.SpotifyOverlay && window.SpotifyOverlay.isOpen && window.SpotifyOverlay.isOpen()) {
+      window.SpotifyOverlay.close();
+      return;
+    }
+
     // 1. If Virtual Keyboard is open, close it
     if (window.VirtualKeyboard && window.VirtualKeyboard.isOpen()) {
       window.VirtualKeyboard.close(false);
