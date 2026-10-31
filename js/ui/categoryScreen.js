@@ -19,9 +19,9 @@ window.CategoryScreen = (function () {
     container.innerHTML = `
       <div class="category-header">
         <div class="category-title-group">
-          <button type="button" class="btn-secondary focusable" id="cat-back-btn" tabindex="0" style="padding: 1vh 1.4vw; border-radius: 50%;">
-            ${window.Utils.getIcon('arrowLeft')}
-          </button>
+         <button type="button" class="back-btn focusable" id="cat-back-btn" tabindex="0">
+  ${window.Utils.getIcon('arrowLeft')}<span>${window.t('hint_back')}</span>
+</button>
           <h1 class="category-title">${isRun ? window.t('virtual_run') : window.t('games')}</h1>
           <span class="category-count-badge" id="cat-count-badge">Loading...</span>
         </div>
@@ -96,28 +96,36 @@ window.CategoryScreen = (function () {
     return html;
   }
 
-  function renderCards(items) {
-    const track = document.getElementById('cat-carousel-track');
-    const badge = document.getElementById('cat-count-badge');
-    if (!track) return;
+function renderCards(items) {
+  const track = document.getElementById('cat-carousel-track');
+  const badge = document.getElementById('cat-count-badge');
+  if (!track) return;
 
-    if (!items || items.length === 0) {
-      showEmptyState();
-      return;
-    }
-
-    if (badge) {
-      badge.textContent = window.t('content_count', { count: items.length });
-    }
-
-    track.innerHTML = items.map((item, idx) => buildCardHtml(item, idx)).join('');
-    setupCardInteractions(track, items);
-
-    // Handle thumbnail fallback loading cascade
-    track.querySelectorAll('.catalog-card-poster').forEach(img => {
-      handleImageFallbacks(img);
-    });
+  if (!items || items.length === 0) {
+    showEmptyState();
+    return;
   }
+
+  if (badge) badge.textContent = window.t('content_count', { count: items.length });
+
+  // Nothing changed -> don't touch the DOM (keeps focus ring + scroll stable)
+  const sig = items.map(i => i.id).join(',');
+  if (track.dataset.sig === sig && track.querySelector('.catalog-card[data-item-id]')) return;
+
+  // Remember which card has the focus so we can restore it after the rebuild
+  const f = window.Focus && window.Focus.getCurrent();
+  const focusedId = f && track.contains(f) ? f.getAttribute('data-item-id') : null;
+
+  track.innerHTML = items.map((item, idx) => buildCardHtml(item, idx)).join('');
+  track.dataset.sig = sig;
+  setupCardInteractions(track, items);
+  track.querySelectorAll('.catalog-card-poster').forEach(handleImageFallbacks);
+
+  if (focusedId) {
+    const again = track.querySelector(`.catalog-card[data-item-id="${focusedId}"]`);
+    if (again) window.Focus.setFocus(again);
+  }
+}
 
   function appendCardProgressively(newItem) {
     const track = document.getElementById('cat-carousel-track');
@@ -144,7 +152,8 @@ window.CategoryScreen = (function () {
     cardEl.addEventListener('click', () => {
       launchContentItem(newItem);
     });
-
+track.dataset.sig = Array.from(track.querySelectorAll('.catalog-card[data-item-id]'))
+  .map(c => c.getAttribute('data-item-id')).join(',');
     const badge = document.getElementById('cat-count-badge');
     if (badge) {
       badge.textContent = window.t('content_count', { count: track.children.length });
