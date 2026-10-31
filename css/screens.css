@@ -525,15 +525,14 @@
    -------------------------------------------------------------------------- */
 .category-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   margin-bottom: 2.5vh;
 }
-
 .category-title-group {
   display: flex;
-  align-items: baseline;
-  gap: 1.2vw;
+  align-items: center;
+  gap: 1.4vw;
 }
 
 .category-title {
@@ -554,8 +553,9 @@
 
 .catalog-carousel-viewport {
   position: relative;
-  height: 62vh;
-  width: 100%;
+  height: 66vh;
+  width: calc(100% + 4vw);
+  margin-left: -2vw;
   overflow: hidden;
 }
 
@@ -563,8 +563,8 @@
   display: flex;
   gap: 2vw;
   position: absolute;
-  top: 1vh;
-  left: 0;
+  top: 4vh;
+  left: 2vw;
   height: 58vh;
   transition: transform 300ms var(--ease-out);
   will-change: transform;
