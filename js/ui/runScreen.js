@@ -3,8 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * MatPad TV - Virtual Run (Treadmill) Screen
- * Step-driven stats, canvas video playback paced by running speed,
- * hydration alerts, session history.
+ * - Step events (from Java) -> steps, speed, cadence, distance, calories
+ * - Frames are PULLED from Java (Android.pollFrame) and drawn on a canvas,
+ *   at a rate that follows the player's running speed (slow motion when still)
+ * - Hydration alert, session history (best speed), summary
+ *
+ * Java -> JS API (window.MatPadRun):
+ *   onStep(epochMs?)        one call per step on the mat
+ *   onFrame(urlOrBase64)    optional push (pull is the default)
+ *   setFrameInfo({fps})     source fps of the video
+ *   onHydrate()             show water / breathing alert
+ * Java -> JS events (MatPadApp.onNativeEvent):
+ *   hydrate | run_loading {percent} | run_error {message} | run_ended
  */
 
 window.RunScreen = (function () {
@@ -14,9 +24,11 @@ window.RunScreen = (function () {
     MIN_RATE: 0.06,      // playback rate when the player stands still (very slow)
     MAX_RATE: 1.8,       // playback rate cap
     REF_SPEED: 8,        // km/h at which the video plays at normal speed (rate 1.0)
-    SRC_FPS: 30,         // fps of the frames sent by Java (override with setFrameInfo)
-    MAX_QUEUE: 90,       // max frames buffered in JS
-    MIN_STEP_GAP: 150,   // ms, ignore faster events (mat bounce)
+    SRC_FPS: 30,         // source fps (override with setFrameInfo)
+    MAX_QUEUE: 60,       // max frames buffered in JS
+    PULL_MS: 33,         // how often we ask Java for frames
+    PULL_BURST: 4,       // max frames fetched per pull tick
+    MIN_STEP_GAP: 150,   // ms, ignore faster step events (mat bounce)
     IDLE_RESET: 3000,    // ms without step => considered stopped
     SPEED_WINDOW: 4,     // steps used to average the speed
     MAX_SPEED: 25,       // km/h sanity cap
@@ -24,16 +36,16 @@ window.RunScreen = (function () {
   };
   const CFG = Object.assign({}, DEFAULTS, (window.CONFIG && window.CONFIG.RUN) || {});
 
-  // [km/h, MET] - interpolated
+  // [km/h, MET] - linearly interpolated
   const MET_TABLE = [[0, 1.5], [3, 2.5], [4.5, 3.5], [6, 5], [8, 8.3], [9.7, 9.8],
                      [11, 11], [12.8, 12.8], [14.5, 14.8], [16, 16], [19, 19]];
 
   const CANVAS_W = 1280, CANVAS_H = 720;
 
-  let S = null;            // session state (null when screen is not mounted)
+  let S = null;            // session state (null when the screen is not mounted)
   let R = {};              // cached DOM refs
   let canvas = null, ctx = null, layerEl = null;
-  let rafId = null, tickId = null;
+  let rafId = null, tickId = null, pullId = null;
   let confirmModal = null, summaryModal = null;
   let keyHandler = null, nativeHandler = null;
 
@@ -45,6 +57,12 @@ window.RunScreen = (function () {
     const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
     const mm = String(m).padStart(2, '0'), ss = String(s).padStart(2, '0');
     return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+  }
+
+  function releaseUrl(u) {
+    if (typeof u === 'string' && u.indexOf('blob:') === 0) {
+      try { URL.revokeObjectURL(u); } catch (e) {}
+    }
   }
 
   /* ----------------------------------------------------------------------
@@ -62,8 +80,8 @@ window.RunScreen = (function () {
     if (v <= T[0][0]) return T[0][1];
     for (let i = 1; i < T.length; i++) {
       if (v <= T[i][0]) {
-        const [x0, y0] = T[i - 1], [x1, y1] = T[i];
-        return y0 + (y1 - y0) * (v - x0) / (x1 - x0);
+        const a = T[i - 1], b = T[i];
+        return a[1] + (b[1] - a[1]) * (v - a[0]) / (b[0] - a[0]);
       }
     }
     return T[T.length - 1][1];
@@ -105,10 +123,8 @@ window.RunScreen = (function () {
     renderStats();
   }
 
-  // Called by Java with one video frame:
-  //  - base64 JPEG/WebP string (no prefix), or
-  //  - a data:/https:/blob: URL
-  // Returns false if the buffer is full (Java should wait).
+  // Push API (optional): a blob:/https: URL or a base64 JPEG string.
+  // Returns false when the buffer is full.
   function onFrame(data) {
     if (!S || !data) return false;
     if (S.queue.length >= CFG.MAX_QUEUE) return false;
@@ -118,15 +134,39 @@ window.RunScreen = (function () {
     return true;
   }
 
+  // Pull API: ask Java for frames while we have room.
+  // Android.pollFrame() returns byte[] (arrives as an array of signed numbers)
+  // or a base64 String when Java is configured with USE_BASE64.
+  function pullFrames() {
+    if (!S || S.finished) return;
+    const A = window.Android;
+    if (!A || !A.pollFrame) return;
+    let n = 0;
+    while (getBufferSize() < CFG.MAX_QUEUE && n < CFG.PULL_BURST) {
+      let res;
+      try { res = A.pollFrame(); } catch (e) { return; }
+      if (!res || !res.length) return;                  // nothing ready yet
+      let src;
+      if (typeof res === 'string') {
+        src = res;                                      // base64
+      } else {
+        // signed bytes (-128..127) wrap correctly into Uint8Array
+        src = URL.createObjectURL(new Blob([Uint8Array.from(res)], { type: 'image/jpeg' }));
+      }
+      if (!onFrame(src)) { releaseUrl(src); return; }
+      n++;
+    }
+  }
+
   function setFrameInfo(info) {
     if (S && info && info.fps > 0) S.srcFps = info.fps;
   }
 
   function onHydrate() {
-    if (!R.hydrate) return;
+    if (!R.hydrate || !S) return;
     R.hydrate.classList.add('show');
-    clearTimeout(S && S.hydrateTimer);
-    if (S) S.hydrateTimer = setTimeout(() => R.hydrate && R.hydrate.classList.remove('show'), CFG.HYDRATE_MS);
+    clearTimeout(S.hydrateTimer);
+    S.hydrateTimer = setTimeout(() => R.hydrate && R.hydrate.classList.remove('show'), CFG.HYDRATE_MS);
   }
 
   function getBufferSize() {
@@ -160,7 +200,8 @@ window.RunScreen = (function () {
   function drawDemo(dt) {
     S.demoOffset = (S.demoOffset + dt * (40 + S.rate * 700)) % 120;
     const g = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-    g.addColorStop(0, '#0b1d3a'); g.addColorStop(0.45, '#1c3f6e'); g.addColorStop(0.46, '#10151f'); g.addColorStop(1, '#05070c');
+    g.addColorStop(0, '#0b1d3a'); g.addColorStop(0.45, '#1c3f6e');
+    g.addColorStop(0.46, '#10151f'); g.addColorStop(1, '#05070c');
     ctx.fillStyle = g; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     ctx.fillStyle = 'rgba(0,229,255,0.5)';
     for (let i = 0; i < 8; i++) {
@@ -196,7 +237,10 @@ window.RunScreen = (function () {
       S.maxSpeed = S.speed;
       if (S.lastBest > 0 && !S.recordShown && S.maxSpeed > S.lastBest + 0.05) {
         S.recordShown = true;
-        if (window.Notify) window.Notify.show({ type: 'success', title: t('run_new_record'), message: S.maxSpeed.toFixed(1) + ' km/h', duration: 3500 });
+        if (window.Notify) {
+          window.Notify.show({ type: 'success', title: t('run_new_record'),
+            message: S.maxSpeed.toFixed(1) + ' km/h', duration: 3500 });
+        }
       }
     }
 
@@ -218,25 +262,19 @@ window.RunScreen = (function () {
     S.acc += dt * S.rate * S.srcFps;
     let frame = null;
     while (S.acc >= 1) {
-      while (S.ready.length && S.ready[0].bad) S.ready.shift();
+      while (S.ready.length && S.ready[0].bad) releaseUrl(S.ready.shift().img.src);
       const e = S.ready[0];
       if (!e || !e.ok) { S.acc = Math.min(S.acc, 1); break; }   // wait for decode / data
+      if (frame) releaseUrl(frame.src);                          // skipped frame
       frame = S.ready.shift().img;
       S.acc -= 1;
     }
     if (frame) {
       drawCover(frame);
+      releaseUrl(frame.src);
       S.frameCount++;
     } else if (S.frameCount === 0 && !window.Bridge.isAvailable()) {
       drawDemo(dt);
-    }
-
-    if (R.status) {
-      const waiting = S.frameCount === 0 && window.Bridge.isAvailable();
-      if (waiting !== S.waiting) {
-        S.waiting = waiting;
-        R.status.style.opacity = waiting ? '1' : '0';
-      }
     }
   }
 
@@ -255,11 +293,26 @@ window.RunScreen = (function () {
     R.progress.style.transform = `scaleX(${Math.min(1, S.videoTime / S.total)})`;
   }
 
+  function updateStatus() {
+    if (!R.status || !S) return;
+    const waiting = S.frameCount === 0 && window.Bridge.isAvailable();
+    const msg = S.statusMsg || (waiting ? t('run_buffering') : '');
+    if (msg !== S.statusShown) {
+      S.statusShown = msg;
+      R.status.textContent = msg;
+      R.status.style.opacity = msg ? '1' : '0';
+    }
+  }
+
   function tick() {
     if (!S) return;
     renderStats();
     const c = clockText(new Date());
     if (R.clock && R.clock.textContent !== c) R.clock.textContent = c;
+
+    // Frames are arriving => clear any loading / error message
+    if (S.frameCount > 0 && S.statusMsg && !S.errorShown) S.statusMsg = '';
+    updateStatus();
 
     S.tickCount++;
     if (S.tickCount % 2 === 0 && window.Bridge.isAvailable()) {
@@ -357,7 +410,8 @@ window.RunScreen = (function () {
       lastBest: last && last.maxSpeed ? last.maxSpeed : 0, recordShown: false,
       lastStepAt: 0, win: [],
       rate: CFG.MIN_RATE, videoTime: 0, acc: 0, srcFps: item.fps || CFG.SRC_FPS,
-      queue: [], ready: [], frameCount: 0, lastFrameAt: 0, waiting: false, demoOffset: 0,
+      queue: [], ready: [], frameCount: 0, lastFrameAt: 0, demoOffset: 0,
+      statusMsg: '', statusShown: null, errorShown: false,
       lastT: performance.now(), tickCount: 0,
       finished: false, saved: false, allowExit: false, hydrateTimer: null
     };
@@ -376,7 +430,7 @@ window.RunScreen = (function () {
         <div class="run-clock" id="run-clock">${clockText(new Date())}</div>
       </div>
 
-      <div class="run-status" id="run-status">${t('run_buffering')}</div>
+      <div class="run-status" id="run-status"></div>
 
       <div class="run-hydrate" id="run-hydrate">
         <div class="run-breath"></div>
@@ -430,7 +484,7 @@ window.RunScreen = (function () {
 
     container.querySelector('#run-end-btn').addEventListener('click', () => openModal(confirmModal));
 
-    // Video layer lives under the screen (the screen has safe-area margins, the video must be full-bleed)
+    // Video layer lives under the screen (the screen has safe-area margins, the video is full-bleed)
     layerEl = document.createElement('div');
     layerEl.id = 'run-video-layer';
     canvas = document.createElement('canvas');
@@ -460,11 +514,27 @@ window.RunScreen = (function () {
     R.sumBody = summaryModal.querySelector('#run-sum-body');
     summaryModal.querySelector('#run-sum-btn').addEventListener('click', () => { closeModal(summaryModal); exitRun(); });
 
-    // Events from Java (hydrate / optional step through the generic channel)
+    // Events from Java
     nativeHandler = (e) => {
       const d = e.detail || {};
-      if (d.type === 'hydrate' || d.type === 'run_hydrate' || d.type === 'breath') onHydrate();
-      else if (d.type === 'run_step') onStep(d.payload && d.payload.ts);
+      const p = d.payload || {};
+      if (!S) return;
+      switch (d.type) {
+        case 'hydrate': case 'run_hydrate': case 'breath':
+          onHydrate(); break;
+        case 'run_step':
+          onStep(p.ts); break;
+        case 'run_loading':
+          S.errorShown = false;
+          S.statusMsg = t('run_buffering') + (p.percent ? ' ' + Math.round(p.percent) + '%' : '');
+          updateStatus(); break;
+        case 'run_error':
+          S.errorShown = true;
+          S.statusMsg = p.message || 'Error';
+          updateStatus(); break;
+        case 'run_ended':
+          finishRun(); break;
+      }
     };
     window.addEventListener('matpad:nativeEvent', nativeHandler);
 
@@ -476,6 +546,7 @@ window.RunScreen = (function () {
 
     renderStats();
     tickId = setInterval(tick, 250);
+    pullId = setInterval(pullFrames, CFG.PULL_MS);
     S.lastT = performance.now();
     rafId = requestAnimationFrame(loop);
   }
@@ -492,8 +563,13 @@ window.RunScreen = (function () {
     finalize();
     if (rafId) cancelAnimationFrame(rafId);
     if (tickId) clearInterval(tickId);
-    rafId = tickId = null;
-    if (S) clearTimeout(S.hydrateTimer);
+    if (pullId) clearInterval(pullId);
+    rafId = tickId = pullId = null;
+    if (S) {
+      clearTimeout(S.hydrateTimer);
+      S.queue.forEach(releaseUrl);
+      S.ready.forEach(e => releaseUrl(e.img.src));
+    }
     if (keyHandler) window.removeEventListener('keydown', keyHandler);
     if (nativeHandler) window.removeEventListener('matpad:nativeEvent', nativeHandler);
     [layerEl, confirmModal, summaryModal].forEach(el => el && el.parentNode && el.parentNode.removeChild(el));
