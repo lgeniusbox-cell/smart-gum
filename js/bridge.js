@@ -9,6 +9,16 @@
 window.Bridge = (function () {
   'use strict';
 
+  function onRunBuffer(status) {
+  callNative('onRunBuffer', JSON.stringify(status));
+}
+
+function onRunStopped(summary) {
+  if (!isAvailable()) { console.log('[Bridge SIMULATION] run stopped', summary); return; }
+  callNative('onRunStopped', JSON.stringify(summary));
+}
+
+
   function isAvailable() {
     return typeof window.Android !== 'undefined' && window.Android !== null;
   }
@@ -134,6 +144,8 @@ window.Bridge = (function () {
     onProfileDeleted,
     onContentSelected,
     onNotification,
-    onExitRequested
+    onExitRequested,
+       onRunBuffer,
+   onRunStopped
   };
 })();
