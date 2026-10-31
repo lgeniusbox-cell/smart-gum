@@ -1,15 +1,12 @@
 /*!
  * spotify-overlay.js
- * High-performance, TV-optimized Spotify companion drawer for MatPad TV.
- * Features:
- *   - Mobile aspect ratio side drawer positioned at right-center
- *   - TV Remote D-Pad spatial navigation & Gamepad input
- *   - Instant Universal Music Catalog search (zero-403 fallback with audio previews)
- *   - Embedded In-Drawer Audio Preview Player with real-time progress & equalizer animation
- *   - Curated high-energy sports, running, and gaming playlists (1-click Spotify embed)
- *   - Direct Spotify playlist/track URL & URI loader
- *   - PKCE OAuth authentication for registered Spotify accounts
- *   - TV Remote Back / Escape / Gamepad B exit handling
+ * TV-optimized Spotify companion drawer for MatPad TV.
+ *   - Spotify-only: search (Web API), PKCE login, full-length playback
+ *   - Playback = Spotify Connect control through the Web API (works in any WebView),
+ *     plus the Web Playback SDK as a local "MatPad TV" device when the WebView has Widevine/EME
+ *   - Requires Spotify Premium (Spotify's rule for playback + Development Mode apps)
+ *   - Spotify embed iframe only as a last-resort fallback (30-second previews if not logged in)
+ *   - TV remote D-pad / gamepad navigation, keyboard only requested on Enter
  */
 (function () {
   'use strict';
@@ -22,7 +19,7 @@
     CLIENT_ID: 'c71dede0d5f54fae87823d248c5eeadb',
     REDIRECT_URI: location.origin + location.pathname,
     TOKEN_PROXY_URL: '',
-    PAGE_SIZE: 15
+    PAGE_SIZE: 10   // Spotify Dev Mode caps /search at limit=10 (Feb 2026)
   };
 
   var API = 'https://api.spotify.com/v1';
@@ -200,7 +197,7 @@
       lsSet('sp_verifier', verifier);
       lsSet('sp_state', state);
       lsSet('sp_reopen', '1');
-      var scopes = 'user-read-private user-read-email playlist-read-private';
+      var scopes = 'streaming user-read-private user-read-email user-read-playback-state user-modify-playback-state playlist-read-private';
       var q = 'client_id=' + encodeURIComponent(CONFIG.CLIENT_ID) +
         '&response_type=code' +
         '&redirect_uri=' + encodeURIComponent(CONFIG.REDIRECT_URI) +
@@ -269,24 +266,37 @@
     return refreshToken();
   }
 
-  function api(path, retried) {
+  function apiError(message, status, reason) {
+    var e = new Error(message);
+    e.status = status;
+    e.reason = reason;
+    return e;
+  }
+
+  // opts: { method, body }. Resolves {} for 204 / empty bodies.
+  function api(path, opts, retried) {
+    opts = opts || {};
     return getToken(!!retried).then(function (token) {
-      return fetch(API + path, { headers: { Authorization: 'Bearer ' + token } });
-    }).then(function (r) {
-      if (r.status === 401 && !retried) return api(path, true);
-      if (r.status === 401) { clearTokens(); throw new Error('AUTH_REQUIRED'); }
-      if (r.status === 403) {
-        clearTokens();
-        throw new Error('403_DEV_MODE');
+      var init = { method: opts.method || 'GET', headers: { Authorization: 'Bearer ' + token } };
+      if (opts.body) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(opts.body);
       }
+      return fetch(API + path, init);
+    }).then(function (r) {
+      if (r.status === 401 && !retried) return api(path, opts, true);
+      if (r.status === 401) { clearTokens(); throw apiError('AUTH_REQUIRED', 401); }
       if (r.status === 429) {
         var wait = r.headers.get('Retry-After');
-        throw new Error('Spotify rate limit. Retry in ' + (wait || 'a few') + 's.');
+        throw apiError('Spotify rate limit. Retry in ' + (wait || 'a few') + 's.', 429, 'RATE_LIMIT');
       }
-      return r.json().catch(function () { return {}; }).then(function (j) {
+      return r.text().then(function (txt) {
+        var j = {};
+        try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = {}; }
         if (!r.ok) {
-          var msg = (j && j.error && (j.error.message || j.error)) || ('Spotify error ' + r.status);
-          throw new Error(String(msg));
+          var er = j && j.error;
+          var msg = (er && (er.message || er)) || ('Spotify error ' + r.status);
+          throw apiError(String(msg), r.status, er && er.reason);
         }
         return j;
       });
@@ -800,78 +810,189 @@
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Audio Preview Player Core                                          */
+  /*  Playback engine                                                   */
+  /*  1) Web Playback SDK -> a local "MatPad TV" Connect device, only    */
+  /*     when the WebView supports Widevine/EME (many TV WebViews don't) */
+  /*  2) Spotify Connect via Web API -> plays on any of the user's       */
+  /*     devices (phone, speaker, Spotify TV app). Always available.     */
   /* ------------------------------------------------------------------ */
-  var audioPlayer = null;
-  var currentTrack = null;
+  var DEVICE_NAME = 'MatPad TV';
+  var P = {
+    sdk: null,
+    sdkDeviceId: null,
+    sdkLoading: false,
+    nowUri: null,
+    state: null,      // { playing, progress, duration, at }
+    pollTimer: null,
+    tickTimer: null
+  };
 
-  function initAudio() {
-    if (audioPlayer) return;
-    audioPlayer = new Audio();
-    audioPlayer.addEventListener('timeupdate', onAudioTimeUpdate);
-    audioPlayer.addEventListener('ended', onAudioEnded);
-    audioPlayer.addEventListener('play', function () { updateAudioUI(true); });
-    audioPlayer.addEventListener('pause', function () { updateAudioUI(false); });
-    audioPlayer.addEventListener('error', function () {
-      console.warn('[MatPad Audio] Audio stream error');
-      if (window.Notify) {
-        window.Notify.show({ type: 'warning', title: 'Audio Stream', message: 'Could not stream preview track' });
-      }
-      stopAudio();
+  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function widevineAvailable() {
+    if (!window.isSecureContext || !navigator.requestMediaKeySystemAccess) return Promise.resolve(false);
+    return navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+      initDataTypes: ['cenc'],
+      audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }]
+    }]).then(function () { return true; }, function () { return false; });
+  }
+
+  function initWebPlayback() {
+    if (P.sdk || P.sdkLoading || !hasSession()) return;
+    P.sdkLoading = true;
+    widevineAvailable().then(function (ok) {
+      if (!ok) { P.sdkLoading = false; return; }  // Connect-only mode
+      window.onSpotifyWebPlaybackSDKReady = function () {
+        var player = new window.Spotify.Player({
+          name: DEVICE_NAME,
+          getOAuthToken: function (cb) { getToken().then(cb).catch(function () {}); },
+          volume: 0.8
+        });
+        player.addListener('ready', function (e) { P.sdkDeviceId = e.device_id; });
+        player.addListener('not_ready', function () { P.sdkDeviceId = null; });
+        ['initialization_error', 'authentication_error', 'account_error', 'playback_error'].forEach(function (ev) {
+          player.addListener(ev, function (e) {
+            console.warn('[Spotify SDK] ' + ev + ':', e && e.message);
+            if (ev !== 'playback_error') P.sdkDeviceId = null;  // fall back to Connect devices
+          });
+        });
+        P.sdk = player;
+        player.connect();
+      };
+      var sc = document.createElement('script');
+      sc.src = 'https://sdk.scdn.co/spotify-player.js';
+      sc.async = true;
+      sc.onerror = function () { P.sdkLoading = false; };
+      document.head.appendChild(sc);
     });
   }
 
-  function playPreviewTrack(track) {
-    initAudio();
-    currentTrack = track;
+  function stopWebPlayback() {
+    if (P.sdk) { try { P.sdk.disconnect(); } catch (e) { /* ignore */ } }
+    P.sdk = null; P.sdkDeviceId = null; P.sdkLoading = false;
+  }
 
-    // Hide Spotify embed iframe
-    if (dom.playerFrame) {
-      dom.playerFrame.src = '';
-      dom.playerFrame.style.display = 'none';
-    }
+  // Prefer this page's own SDK device, then the active device, then any usable one.
+  function pickDevice() {
+    return api('/me/player/devices').then(function (r) {
+      var list = ((r && r.devices) || []).filter(function (d) { return !d.is_restricted; });
+      return list.filter(function (d) { return d.id === P.sdkDeviceId; })[0] ||
+        list.filter(function (d) { return d.is_active; })[0] ||
+        list[0] || null;
+    });
+  }
 
-    if (!track.previewUrl) {
-      if (window.Notify) {
-        window.Notify.show({ type: 'warning', title: 'No Preview', message: 'No 30-sec preview available for this track' });
+  // payload: { uris:[...], offset?:{uri} } or { context_uri }
+  // meta: { title, artist, img, uri, embed?:{type,id} }
+  function playSpotify(payload, meta) {
+    if (!hasSession()) { renderAccountBar(); focusLoginButton(); return Promise.resolve(); }
+    if (P.sdk && P.sdk.activateElement) { try { P.sdk.activateElement(); } catch (e) { /* ignore */ } }
+    return pickDevice().then(function (dev) {
+      if (!dev) throw apiError('NO_DEVICE', 404, 'NO_DEVICE');
+      var pre = (dev.id === P.sdkDeviceId && !dev.is_active)
+        ? api('/me/player', { method: 'PUT', body: { device_ids: [dev.id], play: false } }).then(function () { return delay(350); })
+        : Promise.resolve();
+      return pre.then(function () {
+        return api('/me/player/play?device_id=' + encodeURIComponent(dev.id), { method: 'PUT', body: payload });
+      }).then(function () {
+        hideEmbed();
+        P.state = null;
+        P.nowUri = meta && meta.uri || null;
+        if (meta) showNowPlaying(meta);
+        refreshState(900);
+        if (window.Notify) {
+          window.Notify.show({
+            type: 'success', title: 'Now Playing on ' + dev.name,
+            message: (meta && meta.title) || '', duration: 3000
+          });
+        }
+      });
+    }).catch(function (err) { handlePlayError(err, meta); });
+  }
+
+  function handlePlayError(err, meta) {
+    var reason = err && err.reason;
+    var text;
+    if (err && err.message === 'AUTH_REQUIRED') { renderAccountBar(); focusLoginButton(); return; }
+    if (reason === 'PREMIUM_REQUIRED') {
+      text = 'Spotify Premium is required to play full songs.';
+    } else if (reason === 'NO_DEVICE' || reason === 'NO_ACTIVE_DEVICE' || (err && err.status === 404)) {
+      text = 'No Spotify device found. Open Spotify on your phone, speaker or TV (same account), then press play again.';
+      if (meta && meta.embed) {
+        text += ' Showing the Spotify embed meanwhile (30-second previews only).';
+        playEmbed(meta.embed.type, meta.embed.id);
       }
+    } else if (err && err.status === 403) {
+      text = 'Spotify refused the request. The app owner needs Premium and your account must be listed under Users and Access.';
+    } else {
+      text = (err && err.message) || 'Playback failed.';
+    }
+    showNotice('<div class="sp-notice-title"><span>⚠️</span> Spotify</div><div>' + escapeHtml(text) + '</div>', true);
+  }
+
+  function playerCmd(method, path) {
+    return api(path, { method: method }).then(function () { refreshState(500); }).catch(function (e) { handlePlayError(e); });
+  }
+  function togglePlayback() { playerCmd('PUT', P.state && P.state.playing ? '/me/player/pause' : '/me/player/play'); }
+  function skipNext() { playerCmd('POST', '/me/player/next'); }
+  function skipPrev() { playerCmd('POST', '/me/player/previous'); }
+
+  // Poll /me/player (kept slow: Dev Mode apps share a small quota)
+  function refreshState(wait) {
+    clearTimeout(P.pollTimer);
+    if (!S.open || !hasSession()) return;
+    P.pollTimer = setTimeout(function () {
+      if (!S.open || !hasSession()) return;
+      api('/me/player').then(applyState).catch(function () {}).then(function () { refreshState(5000); });
+    }, wait == null ? 5000 : wait);
+  }
+
+  function applyState(st) {
+    if (!st || !st.item) {
+      P.state = null; P.nowUri = null;
+      hideNowPlaying();
       return;
     }
+    var it = st.item;
+    var artist = (it.artists || []).map(function (a) { return a.name; }).join(', ') || (it.show && it.show.name) || '';
+    var imgs = (it.album && it.album.images) || (it.show && it.show.images) || [];
+    var img = imgs.length ? imgs[Math.min(1, imgs.length - 1)].url : '';
+    P.nowUri = it.uri;
+    P.state = { playing: !!st.is_playing, progress: st.progress_ms || 0, duration: it.duration_ms || 0, at: Date.now() };
+    showNowPlaying({ title: it.name, artist: artist, img: img, uri: it.uri });
+    paintProgress();
+  }
 
-    audioPlayer.src = track.previewUrl;
-    audioPlayer.currentTime = 0;
-    audioPlayer.play().catch(function (e) {
-      console.warn('[Audio Play] Error:', e);
-    });
+  function startTick() { if (!P.tickTimer) P.tickTimer = setInterval(paintProgress, 500); }
+  function stopTick() { clearInterval(P.tickTimer); P.tickTimer = null; }
 
-    showPreviewPlayer(track);
+  function paintProgress() {
+    if (!P.state || !dom.prevFill) return;
+    var cur = P.state.progress + (P.state.playing ? Date.now() - P.state.at : 0);
+    cur = Math.min(cur, P.state.duration || cur);
+    dom.prevFill.style.width = (P.state.duration ? (cur / P.state.duration) * 100 : 0) + '%';
+    dom.prevTime.textContent = formatTime(cur / 1000) + ' / ' + formatTime(P.state.duration / 1000);
+  }
+
+  function updatePlayUI(isPlaying) {
+    if (dom.prevPlayBtn) dom.prevPlayBtn.innerHTML = isPlaying ? '⏸' : '▶';
+    if (dom.prevEq) dom.prevEq.classList.toggle('sp-eq-paused', !isPlaying);
+  }
+
+  function showNowPlaying(meta) {
+    if (!dom.previewPlayer || !dom.playerWrap) return;
+    dom.prevCover.src = meta.img || '';
+    dom.prevCover.style.visibility = meta.img ? 'visible' : 'hidden';
+    dom.prevTitle.textContent = meta.title || 'Track';
+    dom.prevArtist.textContent = meta.artist || '';
+    if (!P.state) { dom.prevFill.style.width = '0%'; dom.prevTime.textContent = '0:00 / 0:00'; }
+    updatePlayUI(!P.state || P.state.playing);
+    dom.previewPlayer.style.display = 'flex';
+    dom.playerWrap.classList.add('sp-active');
     updateActiveCardHighlight();
-
-    if (window.Notify) {
-      window.Notify.show({
-        type: 'success',
-        title: 'Now Playing',
-        message: track.title + ' — ' + track.artist,
-        duration: 3500
-      });
-    }
   }
 
-  function toggleAudioPlay() {
-    if (!audioPlayer || !currentTrack) return;
-    if (audioPlayer.paused) {
-      audioPlayer.play().catch(function () {});
-    } else {
-      audioPlayer.pause();
-    }
-  }
-
-  function stopAudio() {
-    if (audioPlayer) {
-      audioPlayer.pause();
-      audioPlayer.currentTime = 0;
-    }
-    currentTrack = null;
+  function hideNowPlaying() {
     if (dom.previewPlayer) dom.previewPlayer.style.display = 'none';
     if (dom.playerWrap && (!dom.playerFrame || dom.playerFrame.style.display === 'none')) {
       dom.playerWrap.classList.remove('sp-active');
@@ -879,68 +1000,21 @@
     updateActiveCardHighlight();
   }
 
-  function onAudioTimeUpdate() {
-    if (!audioPlayer || !dom.prevFill || !dom.prevTime) return;
-    var cur = audioPlayer.currentTime || 0;
-    var dur = audioPlayer.duration || 30;
-    var pct = Math.min(100, (cur / dur) * 100);
-    dom.prevFill.style.width = pct + '%';
-    dom.prevTime.textContent = formatTime(cur) + ' / ' + formatTime(dur);
-  }
-
-  function onAudioEnded() {
-    if (dom.prevFill) dom.prevFill.style.width = '100%';
-    updateAudioUI(false);
-  }
-
-  function updateAudioUI(isPlaying) {
-    if (dom.prevPlayBtn) {
-      dom.prevPlayBtn.innerHTML = isPlaying ? '⏸' : '▶';
-    }
-    if (dom.prevEq) {
-      if (isPlaying) dom.prevEq.classList.remove('sp-eq-paused');
-      else dom.prevEq.classList.add('sp-eq-paused');
-    }
-    updateActiveCardHighlight();
-  }
-
-  function showPreviewPlayer(track) {
-    if (!dom.previewPlayer || !dom.playerWrap) return;
-    dom.prevCover.src = track.img || '';
-    dom.prevTitle.textContent = track.title || 'Track';
-    dom.prevArtist.textContent = track.artist || 'Artist';
-    dom.prevTime.textContent = '0:00 / 0:30';
-    dom.prevFill.style.width = '0%';
-    dom.prevPlayBtn.innerHTML = '⏸';
-    if (dom.prevEq) dom.prevEq.classList.remove('sp-eq-paused');
-
-    dom.previewPlayer.style.display = 'flex';
-    dom.playerWrap.classList.add('sp-active');
-
-    // Scroll player into view
-    setTimeout(function () {
-      dom.playerWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }, 150);
-  }
-
   function updateActiveCardHighlight() {
     if (!dom.resultsBox) return;
-    var cards = dom.resultsBox.querySelectorAll('.sp-card');
-    cards.forEach(function (card) {
-      var isCurrent = currentTrack && String(card.getAttribute('data-track-id')) === String(currentTrack.id);
-      if (isCurrent) {
-        card.classList.add('sp-playing');
-        var pill = card.querySelector('.sp-play-pill');
-        if (pill) {
-          var isPlaying = audioPlayer && !audioPlayer.paused;
-          pill.innerHTML = isPlaying ? '🔊 PLAYING' : '⏸ PAUSED';
-        }
-      } else {
-        card.classList.remove('sp-playing');
-        var p = card.querySelector('.sp-play-pill');
-        if (p) p.innerHTML = '▶ PLAY';
-      }
+    var playing = !!(P.state && P.state.playing);
+    dom.resultsBox.querySelectorAll('.sp-card').forEach(function (card) {
+      var cur = P.nowUri && card.getAttribute('data-uri') === P.nowUri;
+      card.classList.toggle('sp-playing', !!cur);
+      var pill = card.querySelector('.sp-play-pill');
+      if (pill) pill.innerHTML = cur ? (playing ? '🔊 PLAYING' : '⏸ PAUSED') : '▶ PLAY';
     });
+  }
+
+  function hideEmbed() {
+    if (!dom.playerFrame) return;
+    dom.playerFrame.src = '';
+    dom.playerFrame.style.display = 'none';
   }
 
   /* ------------------------------------------------------------------ */
@@ -1007,7 +1081,9 @@
   var S = {
     open: false,
     activeUri: null,
-    searchTimer: null
+    searchTimer: null,
+    lastQuery: '',
+    offset: 0
   };
   var dom = {};
   var lastFocusedBeforeOpen = null;
@@ -1110,13 +1186,18 @@
       h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' }, renderCuratedCards())
     ]);
 
+    // Account / login box
+    dom.accountBox = h('div', { class: 'sp-notice-box' });
+
     // Assemble body
+    dom.body.appendChild(dom.accountBox);
     dom.body.appendChild(searchRow);
     dom.body.appendChild(moodsSection);
     dom.body.appendChild(linkRow);
     dom.body.appendChild(dom.noticeBox);
     dom.body.appendChild(dom.resultsBox);
     dom.body.appendChild(dom.curatedSection);
+    renderAccountBar();
 
     // Bottom Embedded Player Wrap
     dom.playerWrap = h('div', { class: 'sp-player-wrap' });
@@ -1128,7 +1209,7 @@
       loading: 'lazy'
     });
 
-    // In-Drawer Audio Preview Player
+    // Now-playing bar (state comes from Spotify, audio plays on the Spotify device)
     dom.prevCover = h('img', { class: 'sp-prev-thumb', alt: 'Cover' });
     dom.prevTitle = h('div', { class: 'sp-prev-title', text: 'Track Title' });
     dom.prevArtist = h('div', { class: 'sp-prev-artist', text: 'Artist' });
@@ -1139,37 +1220,19 @@
       h('div', { class: 'sp-eq-bar' })
     ]);
 
-    dom.prevPlayBtn = h('button', {
-      class: 'sp-ctrl-btn sp-btn-play sp-nav',
-      type: 'button',
-      'aria-label': 'Play/Pause',
-      html: '⏸',
-      onclick: toggleAudioPlay
-    });
-
-    dom.prevStopBtn = h('button', {
-      class: 'sp-ctrl-btn sp-nav',
-      type: 'button',
-      'aria-label': 'Stop Preview',
-      html: '⏹',
-      onclick: stopAudio
-    });
+    dom.prevPrevBtn = h('button', { class: 'sp-ctrl-btn sp-nav', type: 'button', 'aria-label': 'Previous', html: '⏮', onclick: skipPrev });
+    dom.prevPlayBtn = h('button', { class: 'sp-ctrl-btn sp-btn-play sp-nav', type: 'button', 'aria-label': 'Play/Pause', html: '⏸', onclick: togglePlayback });
+    dom.prevNextBtn = h('button', { class: 'sp-ctrl-btn sp-nav', type: 'button', 'aria-label': 'Next', html: '⏭', onclick: skipNext });
 
     dom.prevFill = h('div', { class: 'sp-progress-fill' });
-    dom.prevTime = h('span', { class: 'sp-progress-time', text: '0:00 / 0:30' });
+    dom.prevTime = h('span', { class: 'sp-progress-time', text: '0:00 / 0:00' });
 
     dom.previewPlayer = h('div', { class: 'sp-preview-player', style: 'display: none;' }, [
       h('div', { class: 'sp-prev-main' }, [
         dom.prevCover,
-        h('div', { class: 'sp-prev-meta' }, [
-          dom.prevTitle,
-          dom.prevArtist
-        ]),
+        h('div', { class: 'sp-prev-meta' }, [dom.prevTitle, dom.prevArtist]),
         dom.prevEq,
-        h('div', { class: 'sp-prev-controls' }, [
-          dom.prevPlayBtn,
-          dom.prevStopBtn
-        ])
+        h('div', { class: 'sp-prev-controls' }, [dom.prevPrevBtn, dom.prevPlayBtn, dom.prevNextBtn])
       ]),
       h('div', { class: 'sp-scrubber-row' }, [
         h('div', { class: 'sp-progress-track' }, [dom.prevFill]),
@@ -1198,7 +1261,10 @@
         class: 'sp-card sp-nav',
         tabindex: '0',
         role: 'button',
-        onclick: function () { playEmbed(p.type, p.id); }
+        onclick: function () {
+          playSpotify({ context_uri: 'spotify:' + p.type + ':' + p.id },
+            { title: p.title, artist: 'Playlist', img: p.cover, uri: 'spotify:' + p.type + ':' + p.id, embed: { type: p.type, id: p.id } });
+        }
       }, [
         h('img', {
           class: 'sp-card-thumb',
@@ -1217,9 +1283,6 @@
 
   function playEmbed(type, id) {
     if (!dom.playerWrap || !dom.playerFrame) return;
-
-    // Stop preview audio if running
-    stopAudio();
 
     if (dom.previewPlayer) dom.previewPlayer.style.display = 'none';
     dom.playerFrame.style.display = 'block';
@@ -1247,7 +1310,9 @@
     var val = dom.linkInput ? dom.linkInput.value : '';
     var parsed = parseSpotifyUrl(val);
     if (parsed) {
-      playEmbed(parsed.type, parsed.id);
+      var uri = 'spotify:' + parsed.type + ':' + parsed.id;
+      playSpotify(parsed.type === 'track' ? { uris: [uri] } : { context_uri: uri },
+        { title: 'Spotify ' + parsed.type, artist: '', img: '', uri: uri, embed: { type: parsed.type, id: parsed.id } });
       dom.linkInput.value = '';
     } else {
       showNotice(
@@ -1267,175 +1332,177 @@
       dom.curatedSection.style.display = '';
       return;
     }
-    S.searchTimer = setTimeout(function () {
-      runSearch(q);
-    }, 400);
+    if (!hasSession()) return;
+    S.searchTimer = setTimeout(function () { runSearch(q); }, 700);
   }
 
   /* ------------------------------------------------------------------ */
-  /*  Dual Search Engine: Spotify OAuth with Instant Fallback            */
+  /*  Account bar (login / logout)                                      */
   /* ------------------------------------------------------------------ */
-  function runSearch(query) {
-    if (!query) return;
-    query = query.trim();
-    if (!query) return;
+  function focusLoginButton() {
+    var b = dom.accountBox && dom.accountBox.querySelector('.sp-nav');
+    if (b) { try { b.focus(); b.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ } }
+  }
 
-    dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim); font-size: 0.9rem;">🔎 Searching music for "<strong>' + escapeHtml(query) + '</strong>"...</div>';
+  function doLogin() {
+    lsDel('sp_login_error');
+    startLogin().catch(function (e) {
+      showNotice('<div class="sp-notice-title"><span>⚠️</span> Login</div><div>' + escapeHtml(e.message) + '</div>', true);
+    });
+  }
 
-    // If user has an active Spotify session, try native Spotify API first
+  function doLogout() {
+    clearTokens();
+    stopWebPlayback();
+    clearTimeout(P.pollTimer);
+    P.state = null; P.nowUri = null;
+    hideNowPlaying();
+    dom.resultsBox.innerHTML = '';
+    dom.curatedSection.style.display = '';
+    renderAccountBar();
+  }
+
+  function renderAccountBar() {
+    if (!dom.accountBox) return;
+    dom.accountBox.innerHTML = '';
     if (hasSession()) {
-      api('/search?q=' + encodeURIComponent(query) + '&type=track,playlist&limit=' + CONFIG.PAGE_SIZE)
-        .then(function (res) {
-          dom.curatedSection.style.display = 'none';
-          dom.noticeBox.style.display = 'none';
-          renderSpotifyResults(res, query);
-        })
-        .catch(function (err) {
-          console.warn('[Spotify Native Search] Error, falling back to universal music catalog:', err);
-          var is403 = err && (err.message === '403_DEV_MODE' || String(err.message).indexOf('403') !== -1);
-          if (is403) {
-            clearTokens();
-          }
-          // Fall back seamlessly to universal catalog so search never fails
-          searchUniversalCatalog(query, is403);
-        });
-    } else {
-      // Direct instant catalog search (zero login required, works out of the box)
-      searchUniversalCatalog(query, false);
+      lsDel('sp_login_error');
+      dom.accountBox.style.display = '';
+      dom.accountBox.appendChild(h('div', { style: 'display:flex;align-items:center;justify-content:space-between;gap:1vw;' }, [
+        h('div', { class: 'sp-notice-title', style: 'margin:0;', html: '<span>✅</span> Connected to Spotify' }),
+        h('button', { class: 'sp-chip sp-nav', type: 'button', text: 'Log out', onclick: doLogout })
+      ]));
+      return;
     }
+    var err = lsGet('sp_login_error');
+    dom.accountBox.style.display = '';
+    dom.accountBox.appendChild(h('div', { class: 'sp-notice-title', html: '<span>🎧</span> Log in to play full songs' }));
+    dom.accountBox.appendChild(h('div', { text: 'Search and full-length playback need a Spotify Premium login. Music plays on your Spotify device (phone, speaker, Spotify TV app) or on this TV when supported.' }));
+    if (err) {
+      dom.accountBox.appendChild(h('div', { style: 'color:#ff8a80;margin-top:0.6vh;', text: 'Login failed: ' + err }));
+    }
+    dom.accountBox.appendChild(h('button', {
+      class: 'sp-btn-action sp-nav', type: 'button', text: 'Log in with Spotify',
+      style: 'margin-top:1vh;padding:1.1vh 1.4vw;', onclick: doLogin
+    }));
   }
 
-  function searchUniversalCatalog(query, is403Fallback) {
-    fetch('https://itunes.apple.com/search?term=' + encodeURIComponent(query) + '&entity=song&limit=16')
-      .then(function (r) {
-        if (!r.ok) throw new Error('Search failed: ' + r.status);
-        return r.json();
-      })
-      .then(function (data) {
+  /* ------------------------------------------------------------------ */
+  /*  Spotify search                                                    */
+  /* ------------------------------------------------------------------ */
+  function runSearch(query, more) {
+    query = (query || '').trim();
+    if (!query) return;
+    if (!hasSession()) { renderAccountBar(); focusLoginButton(); return; }
+
+    if (!more) {
+      S.lastQuery = query;
+      S.offset = 0;
+      dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim); font-size: 0.9rem;">🔎 Searching Spotify for "<strong>' + escapeHtml(query) + '</strong>"...</div>';
+    }
+
+    api('/search?q=' + encodeURIComponent(query) + '&type=track,playlist&limit=' + CONFIG.PAGE_SIZE + '&offset=' + S.offset)
+      .then(function (res) {
         dom.curatedSection.style.display = 'none';
-        if (is403Fallback) {
-          showNotice(
-            '<div class="sp-notice-title"><span>⚡</span> Instant Music Mode Active</div>' +
-            '<div>Showing playable songs with instant in-drawer audio previews for <strong>"' + escapeHtml(query) + '"</strong>.</div>' +
-            '<div style="margin-top: 0.6vh; font-size: 0.76rem; color: #a4b8ab;">Tip: To also link direct Spotify API search, add your Spotify email under <em>Users and Access</em> in <a href="https://developer.spotify.com/dashboard" target="_blank" style="color: #1ed760; text-decoration: underline;">Spotify Developer Dashboard</a>.</div>',
-            false
-          );
-        } else {
-          dom.noticeBox.style.display = 'none';
-        }
-        renderUniversalResults(data.results || [], query);
+        dom.noticeBox.style.display = 'none';
+        renderSpotifyResults(res, query, !!more);
       })
-      .catch(function (err) {
-        console.warn('[Universal Search] Error:', err);
-        dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim);">Could not load search results. Please choose from the curated workout playlists below or paste a Spotify link.</div>';
-        dom.curatedSection.style.display = '';
-      });
+      .catch(handleSearchError);
   }
 
-  function renderUniversalResults(results, query) {
-    if (!results || !results.length) {
-      dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim);">No songs found for "<strong>' + escapeHtml(query) + '</strong>". Try another artist, track, or workout vibe above.</div>';
+  function handleSearchError(err) {
+    var msg;
+    if (err && err.message === 'AUTH_REQUIRED') {
+      renderAccountBar();
+      msg = 'Your Spotify session expired. Please log in again.';
+    } else if (err && err.status === 403) {
+      msg = 'Spotify refused the search. In Development Mode only users added under "Users and Access" (max 5) can log in, and the app owner needs Premium.';
+    } else {
+      msg = (err && err.message) || 'Search failed.';
+    }
+    dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim);">' + escapeHtml(msg) + '</div>';
+    dom.curatedSection.style.display = '';
+  }
+
+  function renderSpotifyResults(data, query, append) {
+    var tracks = ((data.tracks && data.tracks.items) || []).filter(Boolean).map(function (t) {
+      var imgs = (t.album && t.album.images) || [];
+      return {
+        kind: 'track', uri: t.uri, title: t.name,
+        sub: (t.artists || []).map(function (a) { return a.name; }).join(', ') + (t.album && t.album.name ? ' · ' + t.album.name : ''),
+        artist: (t.artists || []).map(function (a) { return a.name; }).join(', '),
+        img: imgs.length ? imgs[Math.min(1, imgs.length - 1)].url : ''
+      };
+    });
+    var lists = ((data.playlists && data.playlists.items) || []).filter(Boolean).map(function (p) {
+      return {
+        kind: 'playlist', uri: p.uri, title: p.name,
+        sub: 'Playlist · ' + (p.owner && p.owner.display_name ? p.owner.display_name : 'Spotify'),
+        artist: 'Playlist', img: p.images && p.images[0] ? p.images[0].url : ''
+      };
+    });
+    var items = tracks.concat(lists);
+
+    if (!items.length && !append) {
+      dom.resultsBox.innerHTML = '<div style="padding: 2.5vh 0; text-align: center; color: var(--sp-dim);">No results for "<strong>' + escapeHtml(query) + '</strong>". Try another artist, track or workout vibe.</div>';
       dom.curatedSection.style.display = '';
       return;
     }
 
-    dom.resultsBox.innerHTML = '';
-    var header = h('div', { class: 'sp-section-title' }, [
-      h('span', { text: 'Tracks (' + results.length + ')' }),
-      h('span', { style: 'font-size: 0.72rem; color: var(--sp-dim); font-weight: 600;', text: 'Press OK to Play' })
-    ]);
-    dom.resultsBox.appendChild(header);
+    var trackUris = tracks.map(function (t) { return t.uri; });
+    var list;
+    if (append && dom.resultsBox.__list) {
+      list = dom.resultsBox.__list;
+      if (dom.resultsBox.__more) dom.resultsBox.__more.remove();
+    } else {
+      dom.resultsBox.innerHTML = '';
+      dom.resultsBox.appendChild(h('div', { class: 'sp-section-title' }, [
+        h('span', { text: 'Spotify results' }),
+        h('span', { style: 'font-size: 0.72rem; color: var(--sp-dim); font-weight: 600;', text: 'Press OK to Play' })
+      ]));
+      list = h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' });
+      dom.resultsBox.appendChild(list);
+      dom.resultsBox.__list = list;
+    }
 
-    var list = h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' });
-    results.forEach(function (r) {
-      var trackObj = {
-        id: r.trackId,
-        title: r.trackName,
-        artist: r.artistName,
-        album: r.collectionName || '',
-        img: (r.artworkUrl100 || '').replace('100x100bb.jpg', '300x300bb.jpg'),
-        previewUrl: r.previewUrl,
-        duration: Math.round((r.trackTimeMillis || 30000) / 1000)
-      };
-
-      var isPlaying = currentTrack && String(currentTrack.id) === String(trackObj.id);
-
+    items.forEach(function (item) {
+      var isCur = P.nowUri && P.nowUri === item.uri;
       var card = h('div', {
-        class: 'sp-card sp-nav' + (isPlaying ? ' sp-playing' : ''),
-        'data-track-id': String(trackObj.id),
-        tabindex: '0',
-        role: 'button',
+        class: 'sp-card sp-nav' + (isCur ? ' sp-playing' : ''),
+        'data-uri': item.uri, tabindex: '0', role: 'button',
         onclick: function () {
-          if (currentTrack && String(currentTrack.id) === String(trackObj.id)) {
-            toggleAudioPlay();
+          var meta = { title: item.title, artist: item.artist, img: item.img, uri: item.uri };
+          if (item.kind === 'track') {
+            // queue the whole result list, starting at the chosen track
+            playSpotify({ uris: trackUris, offset: { uri: item.uri } }, meta);
           } else {
-            playPreviewTrack(trackObj);
+            playSpotify({ context_uri: item.uri }, meta);
           }
         }
       }, [
-        trackObj.img ? h('img', {
-          class: 'sp-card-thumb',
-          src: trackObj.img,
-          alt: trackObj.title,
-          onerror: function () { this.style.display = 'none'; }
-        }) : h('div', { class: 'sp-card-thumb', text: '🎵' }),
-        h('div', { class: 'sp-card-body' }, [
-          h('div', { class: 'sp-card-title', text: trackObj.title }),
-          h('div', { class: 'sp-card-sub', text: trackObj.artist + (trackObj.album ? ' · ' + trackObj.album : '') })
-        ]),
-        h('div', { class: 'sp-play-pill', html: isPlaying ? '🔊 PLAYING' : '▶ PLAY' })
-      ]);
-
-      list.appendChild(card);
-    });
-
-    dom.resultsBox.appendChild(list);
-  }
-
-  function renderSpotifyResults(data, query) {
-    var items = [];
-    if (data.tracks && data.tracks.items) {
-      items = items.concat(data.tracks.items.map(function (t) {
-        var artist = t.artists && t.artists[0] ? t.artists[0].name : 'Artist';
-        var img = t.album && t.album.images && t.album.images[0] ? t.album.images[0].url : '';
-        return { type: 'track', id: t.id, title: t.name, sub: artist, img: img, icon: '🎵' };
-      }));
-    }
-    if (data.playlists && data.playlists.items) {
-      items = items.concat(data.playlists.items.filter(Boolean).map(function (p) {
-        var img = p.images && p.images[0] ? p.images[0].url : '';
-        return { type: 'playlist', id: p.id, title: p.name, sub: 'Playlist · ' + (p.owner ? p.owner.display_name : 'Spotify'), img: img, icon: '💿' };
-      }));
-    }
-
-    if (!items.length) {
-      // If Spotify returned 0 results, query universal catalog
-      searchUniversalCatalog(query, false);
-      return;
-    }
-
-    dom.resultsBox.innerHTML = '';
-    var header = h('div', { class: 'sp-section-title', text: 'Spotify Search Results' });
-    dom.resultsBox.appendChild(header);
-
-    var list = h('div', { class: 'sp-cards-list', style: 'margin-top: 1vh;' });
-    items.forEach(function (item) {
-      var card = h('div', {
-        class: 'sp-card sp-nav',
-        tabindex: '0',
-        role: 'button',
-        onclick: function () { playEmbed(item.type, item.id); }
-      }, [
-        item.img ? h('img', { class: 'sp-card-thumb', src: item.img, alt: item.title, onerror: function () { this.style.display = 'none'; } }) : h('div', { class: 'sp-card-thumb', text: item.icon }),
+        item.img ? h('img', { class: 'sp-card-thumb', src: item.img, alt: item.title, onerror: function () { this.style.display = 'none'; } })
+                 : h('div', { class: 'sp-card-thumb', text: item.kind === 'track' ? '🎵' : '💿' }),
         h('div', { class: 'sp-card-body' }, [
           h('div', { class: 'sp-card-title', text: item.title }),
           h('div', { class: 'sp-card-sub', text: item.sub })
         ]),
-        h('div', { class: 'sp-play-pill', text: '▶ PLAY' })
+        h('div', { class: 'sp-play-pill', html: isCur ? '🔊 PLAYING' : '▶ PLAY' })
       ]);
       list.appendChild(card);
     });
-    dom.resultsBox.appendChild(list);
+
+    // Dev Mode caps each page at 10 → offer paging
+    var total = Math.max((data.tracks && data.tracks.total) || 0, (data.playlists && data.playlists.total) || 0);
+    if (S.offset + CONFIG.PAGE_SIZE < Math.min(total, 1000)) {
+      dom.resultsBox.__more = h('button', {
+        class: 'sp-btn-action sp-nav', type: 'button', text: 'Show more',
+        style: 'margin-top:1vh;padding:1.1vh 1.4vw;width:100%;',
+        onclick: function () { S.offset += CONFIG.PAGE_SIZE; runSearch(S.lastQuery, true); }
+      });
+      dom.resultsBox.appendChild(dom.resultsBox.__more);
+    } else {
+      dom.resultsBox.__more = null;
+    }
   }
 
   function showNotice(html, isWarn) {
@@ -1624,7 +1691,15 @@
       screenContainer.style.pointerEvents = 'none';
     }
 
-    // 4. Default focus inside drawer
+    // 4. Start playback engine + now-playing sync (only if logged in)
+    renderAccountBar();
+    if (hasSession()) {
+      initWebPlayback();
+      startTick();
+      refreshState(300);
+    }
+
+    // 5. Default focus inside drawer
     setTimeout(function () {
       if (dom.searchInput) {
         dom.searchInput.focus();
@@ -1652,11 +1727,9 @@
       screenContainer.style.pointerEvents = '';
     }
 
-    // 2. Pause audio preview on drawer exit so user isn't stuck with unexpected noise
-    if (audioPlayer && !audioPlayer.paused) {
-      audioPlayer.pause();
-      updateAudioUI(false);
-    }
+    // 2. Stop UI polling. Music keeps playing on the Spotify device (workout companion).
+    clearTimeout(P.pollTimer);
+    stopTick();
 
     // 3. Resume global TV Focus engine
     if (window.Focus) {
@@ -1712,9 +1785,9 @@
     open: open,
     close: requestClose,
     isOpen: function () { return S.open; },
-    play: playEmbed,
-    playPreview: playPreviewTrack,
+    play: playSpotify,
     login: startLogin,
+    logout: doLogout,
     config: CONFIG
   };
 
