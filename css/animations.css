@@ -70,18 +70,17 @@
    Utility Classes for Dynamic Triggering
    -------------------------------------------------------------------------- */
 .anim-shake {
-  animation: shakeError 400ms var(--ease-spring) both !important;
+  animation: shakeError 400ms var(--ease-spring) backwards !important;
 }
 
 .anim-pulse {
-  animation: successPulse 450ms var(--ease-spring) both !important;
+  animation: successPulse 450ms var(--ease-spring) backwards !important;
 }
 
-.anim-stagger-1 { animation: itemEntrance 320ms var(--ease-out) 60ms both; }
-.anim-stagger-2 { animation: itemEntrance 320ms var(--ease-out) 120ms both; }
-.anim-stagger-3 { animation: itemEntrance 320ms var(--ease-out) 180ms both; }
-.anim-stagger-4 { animation: itemEntrance 320ms var(--ease-out) 240ms both; }
-
+.anim-stagger-1 { animation: itemEntrance 320ms var(--ease-out) 60ms backwards; }
+.anim-stagger-2 { animation: itemEntrance 320ms var(--ease-out) 120ms backwards; }
+.anim-stagger-3 { animation: itemEntrance 320ms var(--ease-out) 180ms backwards; }
+.anim-stagger-4 { animation: itemEntrance 320ms var(--ease-out) 240ms backwards; }
 /* --------------------------------------------------------------------------
    Lite Mode / Low-End Hardware Overrides
    Applied automatically by Performance Governor or user setting
