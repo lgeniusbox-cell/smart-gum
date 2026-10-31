@@ -1486,8 +1486,26 @@
 
         if (action === window.Input.ACTIONS.OK) {
           var cur = document.activeElement;
-          if (cur && dom.root.contains(cur) && cur !== dom.searchInput && cur !== dom.linkInput) {
-            cur.click();
+          if (cur && dom.root.contains(cur)) {
+            if (cur === dom.searchInput) {
+              if (window.VirtualKeyboard && typeof window.VirtualKeyboard.open === 'function') {
+                window.VirtualKeyboard.open({
+                  type: 'text',
+                  initialValue: dom.searchInput.value,
+                  onComplete: function (val) {
+                    if (val != null) {
+                      dom.searchInput.value = val;
+                      runSearch(val);
+                    }
+                  }
+                });
+              }
+            } else if (cur !== dom.linkInput) {
+              cur.click();
+            }
+          } else {
+            var items = getNavElements();
+            if (items.length) items[0].focus();
           }
           return;
         }
@@ -1502,26 +1520,26 @@
           navigateDpad(dirMap[action]);
         }
       });
-    }
-
-    // Fallback standard keyboard listener
-    window.addEventListener('keydown', function (e) {
-      if (!S.open) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        requestClose();
-        return;
-      }
-      var map = { ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right' };
-      if (map[e.key]) {
-        var activeTag = document.activeElement ? document.activeElement.tagName : '';
-        if (activeTag === 'INPUT' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
-          return; // Let typing caret move inside input
+    } else {
+      // Fallback only if central Input engine is absent
+      window.addEventListener('keydown', function (e) {
+        if (!S.open) return;
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          requestClose();
+          return;
         }
-        e.preventDefault();
-        navigateDpad(map[e.key]);
-      }
-    });
+        var map = { ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right' };
+        if (map[e.key]) {
+          var activeTag = document.activeElement ? document.activeElement.tagName : '';
+          if (activeTag === 'INPUT' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+            return;
+          }
+          e.preventDefault();
+          navigateDpad(map[e.key]);
+        }
+      });
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -1529,20 +1547,44 @@
   /* ------------------------------------------------------------------ */
   function open() {
     buildDrawer();
-    lastFocusedBeforeOpen = document.activeElement;
+    lastFocusedBeforeOpen = (window.Focus && window.Focus.getCurrent) ? window.Focus.getCurrent() : document.activeElement;
 
     dom.backdrop.classList.add('sp-open');
     dom.root.classList.add('sp-open');
     S.open = true;
 
-    if (window.Focus && window.Focus.hideFocusRing) {
-      window.Focus.hideFocusRing();
+    // 1. Suspend global TV Focus engine navigation on background screen
+    if (window.Focus) {
+      if (typeof window.Focus.suspend === 'function') {
+        window.Focus.suspend();
+      }
+      if (typeof window.Focus.hideFocusRing === 'function') {
+        window.Focus.hideFocusRing();
+      }
     }
 
-    // Default focus to search bar
+    // 2. Clear focused/pressed classes from background elements
+    var bgFocused = document.querySelectorAll('.focusable.focused, .focusable.pressed');
+    bgFocused.forEach(function (el) {
+      el.classList.remove('focused', 'pressed');
+    });
+
+    // 3. Mark background screen container inert / non-clickable
+    var screenContainer = document.getElementById('screen-container');
+    if (screenContainer) {
+      screenContainer.setAttribute('aria-hidden', 'true');
+      screenContainer.style.pointerEvents = 'none';
+    }
+
+    // 4. Default focus inside drawer
     setTimeout(function () {
-      if (dom.searchInput) dom.searchInput.focus();
-    }, 250);
+      if (dom.searchInput) {
+        dom.searchInput.focus();
+      } else {
+        var navItems = getNavElements();
+        if (navItems.length) navItems[0].focus();
+      }
+    }, 150);
   }
 
   function requestClose() {
@@ -1551,22 +1593,39 @@
     if (dom.backdrop) dom.backdrop.classList.remove('sp-open');
     S.open = false;
 
-    // Pause audio preview on drawer exit so user isn't stuck with unexpected noise
+    // 1. Restore background screen container interactivity
+    var screenContainer = document.getElementById('screen-container');
+    if (screenContainer) {
+      screenContainer.removeAttribute('aria-hidden');
+      screenContainer.style.pointerEvents = '';
+    }
+
+    // 2. Pause audio preview on drawer exit so user isn't stuck with unexpected noise
     if (audioPlayer && !audioPlayer.paused) {
       audioPlayer.pause();
       updateAudioUI(false);
     }
 
-    if (window.Focus && window.Focus.showFocusRing) {
-      window.Focus.showFocusRing();
+    // 3. Resume global TV Focus engine
+    if (window.Focus) {
+      if (typeof window.Focus.resume === 'function') {
+        window.Focus.resume();
+      }
+      if (typeof window.Focus.showFocusRing === 'function') {
+        window.Focus.showFocusRing();
+      }
     }
 
+    // 4. Restore focus to previous background element
     setTimeout(function () {
-      if (lastFocusedBeforeOpen && lastFocusedBeforeOpen.focus) {
-        lastFocusedBeforeOpen.focus();
+      if (lastFocusedBeforeOpen && lastFocusedBeforeOpen.isConnected) {
         if (window.Focus && window.Focus.setFocus) {
           window.Focus.setFocus(lastFocusedBeforeOpen);
+        } else if (lastFocusedBeforeOpen.focus) {
+          lastFocusedBeforeOpen.focus();
         }
+      } else if (window.Focus && window.Focus.focusFirstAvailable) {
+        window.Focus.focusFirstAvailable();
       }
     }, 180);
   }

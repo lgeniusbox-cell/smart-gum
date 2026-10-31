@@ -24,7 +24,33 @@ window.Focus = (function () {
   let ringHidden = false;
   let settleTimer = null;
   let recoverQueued = false;
+  let isSuspended = false;
   const containerMemory = new Map();
+
+  function isBlocked() {
+    if (isSuspended) return true;
+    if (window.SpotifyOverlay && typeof window.SpotifyOverlay.isOpen === 'function' && window.SpotifyOverlay.isOpen()) {
+      return true;
+    }
+    return false;
+  }
+
+  function suspend() {
+    isSuspended = true;
+    hideFocusRing();
+    if (currentElement) {
+      currentElement.classList.remove('focused', 'pressed');
+    }
+  }
+
+  function resume() {
+    isSuspended = false;
+    showFocusRing();
+    if (currentElement && currentElement.isConnected) {
+      currentElement.classList.add('focused');
+      updateFocusRing(currentElement);
+    }
+  }
 
   function init() {
     focusRingEl = document.getElementById('focus-ring');
@@ -37,7 +63,7 @@ window.Focus = (function () {
     // Re-sync the ring whenever the focused element OR any ancestor finishes
     // animating (screen slide, modal scale, keyboard slide, carousel, focus scale).
     const resync = (e) => {
-      if (!currentElement) return;
+      if (!currentElement || isBlocked()) return;
       if (e.type === 'transitionend' && e.propertyName !== 'transform') return;
       const t = e.target;
       if (t === currentElement || (t.contains && t.contains(currentElement))) {
@@ -49,6 +75,7 @@ window.Focus = (function () {
 
     // Real mouse movement only (not content sliding under a still cursor)
     document.addEventListener('mousemove', (e) => {
+      if (isBlocked()) return;
       if (!e.movementX && !e.movementY) return;
       const el = e.target.closest ? e.target.closest('.focusable') : null;
       if (el && el !== currentElement && document.body.contains(el)) {
@@ -58,6 +85,7 @@ window.Focus = (function () {
     });
 
     document.addEventListener('click', (e) => {
+      if (isBlocked()) return;
       const el = e.target.closest ? e.target.closest('.focusable') : null;
       if (el && document.body.contains(el)) {
         if (activeTrapContainer && !activeTrapContainer.contains(el)) return;
@@ -68,6 +96,7 @@ window.Focus = (function () {
     // If the focused element is destroyed by a re-render, recover automatically
     const app = document.getElementById('app') || document.body;
     new MutationObserver(() => {
+      if (isBlocked()) return;
       if (recoverQueued) return;
       recoverQueued = true;
       requestAnimationFrame(() => {
@@ -113,7 +142,7 @@ window.Focus = (function () {
   }
 
   function recoverFocusIfLost() {
-    if (!currentElement || currentElement.isConnected || ringHidden) return;
+    if (isBlocked() || !currentElement || currentElement.isConnected || ringHidden) return;
     const root = getRoot();
     const again = findByDescriptor(currentDesc, root);
     if (again && getFocusableElements(root).includes(again)) {
@@ -130,6 +159,8 @@ window.Focus = (function () {
      Input
      ---------------------------------------------------------------------- */
   function handleAction(action) {
+    if (isBlocked()) return;
+
     if (!currentElement || !currentElement.isConnected) {
       recoverFocusIfLost();
       if (!currentElement) { focusFirstAvailable(getRoot()); return; }
@@ -190,6 +221,7 @@ window.Focus = (function () {
      Spatial navigation
      ---------------------------------------------------------------------- */
   function navigate(direction) {
+    if (isBlocked()) return;
     const candidates = getFocusableElements();
     if (!candidates.length) return;
 
@@ -245,7 +277,7 @@ window.Focus = (function () {
   }
 
   function setFocus(el) {
-    if (!el || !el.isConnected) return;
+    if (isBlocked() || !el || !el.isConnected) return;
 
     if (currentElement) {
       currentElement.classList.remove('focused');
@@ -273,7 +305,7 @@ window.Focus = (function () {
   }
 
   function updateFocusRing(el) {
-    if (!focusRingEl || !el || !el.isConnected) return;
+    if (isBlocked() || !focusRingEl || !el || !el.isConnected) return;
 
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
@@ -416,6 +448,7 @@ window.Focus = (function () {
   return {
     init, setFocus, getCurrent, focusFirstAvailable,
     trapFocus, releaseFocusTrap, updateFocusRing,
-    hideFocusRing, showFocusRing
+    hideFocusRing, showFocusRing,
+    suspend, resume, isSuspended: isBlocked
   };
 })();
