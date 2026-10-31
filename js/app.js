@@ -30,7 +30,7 @@ window.App = (function () {
     window.Router.register('profile_edit', window.ProfileEditScreen);
     window.Router.register('main', window.MainScreen);
     window.Router.register('category', window.CategoryScreen);
-
+    window.Router.register('run', window.RunScreen);
     // 3. Setup Debug Overlay Listener
     setupDebugOverlay();
 
