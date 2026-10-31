@@ -241,7 +241,6 @@ function launchContentItem(item) {
   if (isLaunching) return;
   isLaunching = true;
 
-  // Tell Java which content to stream (it starts sending frames after the first onRunBuffer)
   if (window.Bridge) window.Bridge.onContentSelected(currentCategory, item);
 
   if (currentCategory === 'virtual_run') {
