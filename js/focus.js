@@ -8,14 +8,22 @@
 window.Focus = (function () {
   'use strict';
 
-  const RING_OUTSET = 5; // px gap between the card and the ring
+  const RING_OUTSET = 5;
   const CAROUSEL_SELECTOR = '.catalog-carousel-track, .profile-cards-track';
+  const ID_ATTRS = [
+    'data-item-id', 'data-profile-id', 'data-edit-profile-id', 'data-avatar-url',
+    'data-pin-key', 'data-pin-action', 'data-vk-key', 'data-vk-action'
+  ];
 
   let currentElement = null;
+  let currentDesc = null;
   let focusRingEl = null;
   let activeTrapContainer = null;
-  let previousFocusStack = [];
-  let ringSnap = true; // first placement: jump, don't glide
+  let previousFocusStack = []; // { el, desc }
+  let ringSnap = true;
+  let ringHidden = false;
+  let settleTimer = null;
+  let recoverQueued = false;
   const containerMemory = new Map();
 
   function init() {
@@ -26,17 +34,20 @@ window.Focus = (function () {
       if (currentElement) updateFocusRing(currentElement);
     });
 
-    // Re-sync the ring whenever a layout transition ends (screen slide-in, carousel, etc.)
-    document.addEventListener('transitionend', (e) => {
-      if (!currentElement || e.propertyName !== 'transform') return;
+    // Re-sync the ring whenever the focused element OR any ancestor finishes
+    // animating (screen slide, modal scale, keyboard slide, carousel, focus scale).
+    const resync = (e) => {
+      if (!currentElement) return;
+      if (e.type === 'transitionend' && e.propertyName !== 'transform') return;
       const t = e.target;
-      if (t.classList && (t.classList.contains('screen') || t.matches(CAROUSEL_SELECTOR))) {
+      if (t === currentElement || (t.contains && t.contains(currentElement))) {
         updateFocusRing(currentElement);
       }
-    }, true);
+    };
+    document.addEventListener('transitionend', resync, true);
+    document.addEventListener('animationend', resync, true);
 
-    // Only react to REAL mouse movement. Plain "mouseover" also fires when the
-    // carousel slides under a stationary cursor and steals the focus.
+    // Real mouse movement only (not content sliding under a still cursor)
     document.addEventListener('mousemove', (e) => {
       if (!e.movementX && !e.movementY) return;
       const el = e.target.closest ? e.target.closest('.focusable') : null;
@@ -48,14 +59,78 @@ window.Focus = (function () {
 
     document.addEventListener('click', (e) => {
       const el = e.target.closest ? e.target.closest('.focusable') : null;
-      if (el && document.body.contains(el)) setFocus(el);
+      if (el && document.body.contains(el)) {
+        if (activeTrapContainer && !activeTrapContainer.contains(el)) return;
+        setFocus(el);
+      }
     });
+
+    // If the focused element is destroyed by a re-render, recover automatically
+    const app = document.getElementById('app') || document.body;
+    new MutationObserver(() => {
+      if (recoverQueued) return;
+      recoverQueued = true;
+      requestAnimationFrame(() => {
+        recoverQueued = false;
+        recoverFocusIfLost();
+      });
+    }).observe(app, { childList: true, subtree: true });
   }
 
+  /* ----------------------------------------------------------------------
+     Focus recovery (element replaced by innerHTML re-render)
+     ---------------------------------------------------------------------- */
+  function describe(el) {
+    if (!el) return null;
+    if (el.id) return { id: el.id };
+    for (const a of ID_ATTRS) {
+      if (el.hasAttribute(a)) return { attr: a, value: el.getAttribute(a) };
+    }
+    const parent = el.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(c => c.classList.contains('focusable'));
+      return { cls: el.className.split(' ')[0], index: siblings.indexOf(el) };
+    }
+    return null;
+  }
+
+  function findByDescriptor(desc, root) {
+    if (!desc || !root) return null;
+    const all = Array.from(root.querySelectorAll('.focusable'));
+    if (desc.id) return all.find(e => e.id === desc.id) || null;
+    if (desc.attr) return all.find(e => e.getAttribute(desc.attr) === desc.value) || null;
+    if (desc.cls) {
+      const same = all.filter(e => e.classList.contains(desc.cls));
+      return same[Math.min(Math.max(desc.index, 0), same.length - 1)] || null;
+    }
+    return null;
+  }
+
+  function getRoot() {
+    return activeTrapContainer || document.getElementById('screen-container');
+  }
+
+  function recoverFocusIfLost() {
+    if (!currentElement || currentElement.isConnected || ringHidden) return;
+    const root = getRoot();
+    const again = findByDescriptor(currentDesc, root);
+    if (again && getFocusableElements(root).includes(again)) {
+      setFocus(again);
+    } else {
+      currentElement = null;
+      const list = getFocusableElements(root);
+      if (list.length) setFocus(list[0]);
+      else if (focusRingEl) focusRingEl.classList.remove('active');
+    }
+  }
+
+  /* ----------------------------------------------------------------------
+     Input
+     ---------------------------------------------------------------------- */
   function handleAction(action) {
-    if ((!currentElement || !document.body.contains(currentElement)) && !activeTrapContainer) {
-      focusFirstAvailable();
-      return;
+    if (!currentElement || !currentElement.isConnected) {
+      recoverFocusIfLost();
+      if (!currentElement) { focusFirstAvailable(getRoot()); return; }
     }
 
     if (action === window.Input.ACTIONS.OK) {
@@ -74,7 +149,7 @@ window.Focus = (function () {
     const candidates = Array.from(root.querySelectorAll('.focusable:not([disabled]):not([aria-hidden="true"])'));
     return candidates.filter((el) => {
       const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
       const rect = el.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     });
@@ -83,17 +158,13 @@ window.Focus = (function () {
   /* ----------------------------------------------------------------------
      Geometry helpers
      ---------------------------------------------------------------------- */
-
-  // Reads the CURRENT (mid-transition) translate / scale of an element
   function getTransformValues(el) {
     const t = window.getComputedStyle(el).transform;
     if (!t || t === 'none') return { scale: 1, tx: 0, ty: 0 };
     const m = t.match(/matrix(3d)?\(([^)]+)\)/);
     if (!m) return { scale: 1, tx: 0, ty: 0 };
     const v = m[2].split(',').map(parseFloat);
-    const out = m[1]
-      ? { scale: v[0], tx: v[12], ty: v[13] }
-      : { scale: v[0], tx: v[4], ty: v[5] };
+    const out = m[1] ? { scale: v[0], tx: v[12], ty: v[13] } : { scale: v[0], tx: v[4], ty: v[5] };
     if (!out.scale) out.scale = 1;
     return out;
   }
@@ -103,6 +174,14 @@ window.Focus = (function () {
     return parseFloat(window.getComputedStyle(app).getPropertyValue('--focus-scale')) || 1.05;
   }
 
+  // The scale the element will REALLY have once everything has settled.
+  function resolveFinalScale(el, curScale) {
+    const running = el.getAnimations ? el.getAnimations().length > 0 : true;
+    if (!running) return curScale;               // idle: what we measure is final
+    if (el.classList.contains('no-scale')) return 1;
+    return getFocusScale();                       // transitioning: assume target
+  }
+
   /* ----------------------------------------------------------------------
      Spatial navigation
      ---------------------------------------------------------------------- */
@@ -110,7 +189,7 @@ window.Focus = (function () {
     const candidates = getFocusableElements();
     if (!candidates.length) return;
 
-    if (!currentElement || !document.body.contains(currentElement)) {
+    if (!currentElement || !currentElement.isConnected) {
       setFocus(candidates[0]);
       return;
     }
@@ -162,7 +241,7 @@ window.Focus = (function () {
   }
 
   function setFocus(el) {
-    if (!el || !document.body.contains(el)) return;
+    if (!el || !el.isConnected) return;
 
     if (currentElement) {
       currentElement.classList.remove('focused');
@@ -173,45 +252,48 @@ window.Focus = (function () {
     }
 
     currentElement = el;
+    currentDesc = describe(el);
     currentElement.classList.add('focused');
 
-    // ORDER MATTERS: scroll first (sets the carousel's final position),
-    // then place the ring using the FINAL geometry.
     scrollIntoViewIfNeeded(el);
     updateFocusRing(el);
+
+    // Safety net: after all CSS transitions (modal, keyboard, screen) are done,
+    // measure once more so the ring can never stay misplaced.
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      if (currentElement && currentElement.isConnected) updateFocusRing(currentElement);
+    }, 340);
 
     el.dispatchEvent(new CustomEvent('tv:focus', { bubbles: true }));
   }
 
-  /**
-   * Places the ring on the element's FINAL geometry (after its scale-up and
-   * after any pending carousel translation), so it never lags or lands wrong.
-   */
   function updateFocusRing(el) {
-    if (!focusRingEl || !el || !document.body.contains(el)) return;
+    if (!focusRingEl || !el || !el.isConnected) return;
 
     const rect = el.getBoundingClientRect();
-    const { scale: curScale } = getTransformValues(el);
-    const fs = getFocusScale();
+    if (rect.width === 0 || rect.height === 0) return;
 
-    // Un-scaled size (scale is applied around the centre, so the centre is stable)
+    const curScale = getTransformValues(el).scale;
+    const finalScale = resolveFinalScale(el, curScale);
+
     const baseW = rect.width / curScale;
     const baseH = rect.height / curScale;
 
-    // Pending carousel movement: target minus where it is right now
+    // Pending carousel movement
     let dx = 0;
     const track = el.closest(CAROUSEL_SELECTOR);
     if (track && typeof track._targetX === 'number') {
       dx = track._targetX - getTransformValues(track).tx;
     }
 
-    const w = baseW * fs + RING_OUTSET * 2;
-    const h = baseH * fs + RING_OUTSET * 2;
+    const w = baseW * finalScale + RING_OUTSET * 2;
+    const h = baseH * finalScale + RING_OUTSET * 2;
     const x = rect.left + rect.width / 2 + dx - w / 2;
     const y = rect.top + rect.height / 2 - h / 2;
 
     const br = window.getComputedStyle(el).borderTopLeftRadius || '14px';
-    const radius = br.includes('%') ? br : `calc(${br} * ${fs} + ${RING_OUTSET}px)`;
+    const radius = br.includes('%') ? br : `calc(${br} * ${finalScale} + ${RING_OUTSET}px)`;
 
     const apply = () => {
       focusRingEl.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
@@ -239,11 +321,6 @@ window.Focus = (function () {
     el.dispatchEvent(new CustomEvent('tv:select', { bubbles: true }));
   }
 
-  /**
-   * Minimal carousel scrolling: only moves when the card is (nearly) outside
-   * the viewport, always keeps a safe margin, and never scrolls past the ends.
-   * Uses the track's real current/target position, never a half-finished one.
-   */
   function scrollIntoViewIfNeeded(el) {
     const track = el.closest(CAROUSEL_SELECTOR);
     if (!track) return;
@@ -259,10 +336,9 @@ window.Focus = (function () {
     const eW = eRect.width / elScale;
     const eCenter = eRect.left + eRect.width / 2;
 
-    // Element edges in viewport coordinates when the track has translateX = 0
     const left0 = eCenter - eW / 2 - vRect.left - curTx;
     const right0 = left0 + eW;
-    const base = tRect.left - vRect.left - curTx; // track's own offset inside viewport
+    const base = tRect.left - vRect.left - curTx;
 
     const margin = vRect.width * 0.05;
     const start = typeof track._targetX === 'number' ? track._targetX : curTx;
@@ -274,7 +350,6 @@ window.Focus = (function () {
       newX = vRect.width - margin - right0;
     }
 
-    // Clamp to content bounds
     const minX = Math.min(0, vRect.width - (base + track.scrollWidth) - base);
     newX = Math.max(minX, Math.min(0, newX));
 
@@ -288,30 +363,47 @@ window.Focus = (function () {
   }
 
   function trapFocus(containerEl) {
-    if (currentElement) previousFocusStack.push(currentElement);
+    if (currentElement && currentElement.isConnected) {
+      previousFocusStack.push({ el: currentElement, desc: currentDesc });
+    }
     activeTrapContainer = containerEl;
+    ringSnap = false;
     focusFirstAvailable(containerEl);
   }
 
   function releaseFocusTrap() {
     activeTrapContainer = null;
     const prev = previousFocusStack.pop();
-    if (prev && document.body.contains(prev)) setFocus(prev);
-    else focusFirstAvailable();
+    const root = document.getElementById('screen-container');
+
+    if (prev && prev.el.isConnected && getFocusableElements(root).includes(prev.el)) {
+      setFocus(prev.el);
+      return;
+    }
+    // Previous element was destroyed/re-rendered: find its twin, else first available
+    const twin = prev ? findByDescriptor(prev.desc, root) : null;
+    if (twin && getFocusableElements(root).includes(twin)) {
+      setFocus(twin);
+    } else {
+      currentElement = null;
+      focusFirstAvailable(root);
+    }
   }
 
   function hideFocusRing() {
+    ringHidden = true;
     if (focusRingEl) {
       focusRingEl.classList.remove('active');
       focusRingEl.classList.add('hidden');
     }
-    ringSnap = true; // next placement jumps instead of flying across the screen
+    ringSnap = true;
   }
 
   function showFocusRing() {
+    ringHidden = false;
     if (focusRingEl) {
       focusRingEl.classList.remove('hidden');
-      if (currentElement) updateFocusRing(currentElement);
+      if (currentElement && currentElement.isConnected) updateFocusRing(currentElement);
     }
   }
 
