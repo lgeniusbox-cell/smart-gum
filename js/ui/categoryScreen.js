@@ -237,31 +237,21 @@ track.dataset.sig = Array.from(track.querySelectorAll('.catalog-card[data-item-i
     });
   }
 
-  function launchContentItem(item) {
-    if (isLaunching) return; // Debounce double press
-    isLaunching = true;
+function launchContentItem(item) {
+  if (isLaunching) return;
+  isLaunching = true;
 
-    console.log(`[Category] Launching content item:`, item);
+  // Tell Java which content to stream (it starts sending frames after the first onRunBuffer)
+  if (window.Bridge) window.Bridge.onContentSelected(currentCategory, item);
 
-    // Visual feedback
-    if (window.Notify) {
-      window.Notify.show({
-        type: 'success',
-        title: window.t('content_launching'),
-        message: item.title,
-        duration: 3500
-      });
-    }
-
-    // Call native Android bridge: Android.onContentSelected(category, JSON.stringify(item))
-    if (window.Bridge) {
-      window.Bridge.onContentSelected(currentCategory, item);
-    }
-
-    setTimeout(() => {
-      isLaunching = false;
-    }, 1200);
+  if (currentCategory === 'virtual_run') {
+    window.Router.navigate('run', { item });
+  } else if (window.Notify) {
+    window.Notify.show({ type: 'success', title: window.t('content_launching'), message: item.title, duration: 3500 });
   }
+
+  setTimeout(() => { isLaunching = false; }, 1200);
+}
 
   function showEmptyState() {
     const track = document.getElementById('cat-carousel-track');
