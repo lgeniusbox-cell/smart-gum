@@ -715,3 +715,135 @@
   color: var(--color-text-muted);
   max-width: 32vw;
 }
+/* ==========================================================================
+   6. VIRTUAL RUN SCREEN
+   ========================================================================== */
+#run-video-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: #000;
+  pointer-events: none;
+}
+#run-video-layer canvas { width: 100%; height: 100%; display: block; }
+#run-video-layer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(4, 7, 14, 0.78) 0%, transparent 24%, transparent 52%, rgba(4, 7, 14, 0.92) 100%);
+}
+#app.run-mode .hint-bar { display: none; }
+
+.screen-run { justify-content: space-between; }
+
+.run-top { display: flex; align-items: center; justify-content: space-between; }
+.run-title-block { display: flex; align-items: center; gap: 1.6vw; }
+.run-title {
+  font-size: var(--text-xl);
+  font-weight: 900;
+  color: #fff;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
+  margin-bottom: 0.4vh;
+}
+.run-clock {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-xl);
+  font-weight: 800;
+  color: #fff;
+  padding: 0.8vh 1.4vw;
+  border-radius: var(--radius-pill);
+  background: rgba(4, 7, 14, 0.6);
+  border: 1px solid var(--color-border);
+}
+
+.run-status {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-text-muted);
+  opacity: 0;
+  transition: opacity 300ms ease;
+  pointer-events: none;
+}
+
+.run-board {
+  background: rgba(8, 12, 22, 0.84);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  padding: 2.2vh 1.8vw;
+  display: flex;
+  flex-direction: column;
+  gap: 1.8vh;
+  box-shadow: var(--card-shadow);
+}
+.run-stats { display: grid; grid-template-columns: 1.8fr repeat(5, 1fr); gap: 1.2vw; }
+.run-tile { display: flex; flex-direction: column; gap: 0.4vh; min-width: 0; }
+.run-tile-label {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.run-tile-value {
+  font-size: var(--text-2xl);
+  font-weight: 900;
+  line-height: 1.05;
+  color: var(--color-text-main);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.run-tile-hero .run-tile-value { font-size: var(--text-hero); color: var(--color-primary); }
+.run-tile-unit { font-size: var(--text-sm); font-weight: 700; color: var(--color-text-muted); margin-left: 0.4vw; }
+.run-tile-sub { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-muted); }
+
+.run-progress { height: 0.9vh; border-radius: var(--radius-pill); background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.run-progress-fill {
+  height: 100%;
+  width: 100%;
+  transform-origin: left center;
+  transform: scaleX(0);
+  background: linear-gradient(90deg, var(--color-primary), var(--color-secondary));
+}
+
+/* Hydration / breathing alert */
+.run-hydrate {
+  position: absolute;
+  top: 42%;
+  left: 50%;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 2vw;
+  padding: 3vh 3vw;
+  background: rgba(8, 12, 22, 0.9);
+  border: 2px solid var(--color-primary);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 0 40px var(--color-primary-glow);
+  opacity: 0;
+  transform: translate3d(-50%, -40%, 0);
+  transition: opacity 300ms ease, transform 300ms var(--ease-out);
+  pointer-events: none;
+}
+.run-hydrate.show { opacity: 1; transform: translate3d(-50%, -50%, 0); }
+.run-hydrate-title { font-size: var(--text-xl); font-weight: 900; color: #fff; }
+.run-hydrate-desc { font-size: var(--text-base); color: var(--color-text-muted); }
+.run-breath {
+  width: 9vh;
+  height: 9vh;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--color-primary) 0%, transparent 70%);
+}
+.run-hydrate.show .run-breath { animation: breathe 4s ease-in-out infinite; }
+@keyframes breathe {
+  0%, 100% { transform: scale(0.6); opacity: 0.6; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
+/* Summary modal */
+.run-sum-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.6vh 2vw; text-align: left; }
+.run-sum-grid span { display: block; font-size: var(--text-xs); color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
+.run-sum-grid b { font-size: var(--text-xl); font-weight: 900; color: var(--color-primary); }
