@@ -944,6 +944,64 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /*  Input "lock" helpers                                              */
+  /*  Inputs are read-only (+ inputmode=none) while merely focused so   */
+  /*  the on-screen keyboard never pops up on D-pad navigation. The     */
+  /*  keyboard is only requested after the user presses Enter / OK.     */
+  /* ------------------------------------------------------------------ */
+  function lockInput(el) {
+    if (!el) return;
+    el.readOnly = true;
+    el.setAttribute('inputmode', 'none');
+  }
+
+  function isEditing(el) {
+    return !!el && el.tagName === 'INPUT' && !el.readOnly;
+  }
+
+  function unlockInput(el) {
+    if (!el) return;
+    el.__spUnlocking = true;          // stop the blur handler re-locking us
+    el.readOnly = false;
+    el.setAttribute('inputmode', el.type === 'search' ? 'search' : 'text');
+    el.blur();                        // blur + focus makes Android WebView show the IME
+    el.focus();
+    el.__spUnlocking = false;
+    try {
+      var n = el.value.length;
+      el.setSelectionRange(n, n);
+    } catch (e) { /* search/url inputs may not support selection */ }
+  }
+
+  // Leave edit mode: hides the keyboard, re-locks, keeps D-pad focus on the field.
+  function finishEditing(el) {
+    if (!el) return;
+    el.blur();   // blur handler re-locks the input
+    el.focus();  // now read-only, so no keyboard is requested
+  }
+
+  function wireLockedInput(el) {
+    lockInput(el);
+    el.addEventListener('blur', function () {
+      if (!el.__spUnlocking) lockInput(el);
+    });
+    // Touch / mouse tap counts as an explicit "press" on the field
+    el.addEventListener('click', function () {
+      if (el.readOnly) unlockInput(el);
+    });
+  }
+
+  function submitInput(el) {
+    if (el === dom.searchInput) {
+      clearTimeout(S.searchTimer);
+      var q = el.value.trim();
+      if (q) runSearch(q);
+    } else if (el === dom.linkInput) {
+      handleDirectLink();
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
   /*  Overlay State & UI                                                */
   /* ------------------------------------------------------------------ */
   var S = {
@@ -997,20 +1055,7 @@
       autocomplete: 'off'
     });
     dom.searchInput.addEventListener('input', onSearchInput);
-    dom.searchInput.addEventListener('click', function () {
-      if (window.VirtualKeyboard && typeof window.VirtualKeyboard.open === 'function') {
-        window.VirtualKeyboard.open({
-          type: 'text',
-          initialValue: dom.searchInput.value,
-          onComplete: function (val) {
-            if (val != null) {
-              dom.searchInput.value = val;
-              runSearch(val);
-            }
-          }
-        });
-      }
-    });
+    wireLockedInput(dom.searchInput);
 
     var searchRow = h('div', { class: 'sp-search-row' }, [
       h('svg', { class: 'sp-search-icon', viewBox: '0 0 24 24', html: '<path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>' }),
@@ -1042,9 +1087,7 @@
       placeholder: 'Or paste Spotify link (playlist / track / album)...',
       style: 'font-size: 0.85rem;'
     });
-    dom.linkInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') handleDirectLink();
-    });
+    wireLockedInput(dom.linkInput);
     var linkRow = h('div', { class: 'sp-link-row' }, [
       dom.linkInput,
       h('button', {
@@ -1479,28 +1522,26 @@
       window.Input.addListener(function (action) {
         if (!S.open) return;
 
+        var curEl = document.activeElement;
+        var editing = isEditing(curEl) && dom.root.contains(curEl);
+
         if (action === window.Input.ACTIONS.BACK) {
+          if (editing) { finishEditing(curEl); return; }  // first Back only leaves the field
           requestClose();
           return;
         }
 
         if (action === window.Input.ACTIONS.OK) {
-          var cur = document.activeElement;
+          var cur = curEl;
           if (cur && dom.root.contains(cur)) {
-            if (cur === dom.searchInput) {
-              if (window.VirtualKeyboard && typeof window.VirtualKeyboard.open === 'function') {
-                window.VirtualKeyboard.open({
-                  type: 'text',
-                  initialValue: dom.searchInput.value,
-                  onComplete: function (val) {
-                    if (val != null) {
-                      dom.searchInput.value = val;
-                      runSearch(val);
-                    }
-                  }
-                });
+            if (cur === dom.searchInput || cur === dom.linkInput) {
+              if (cur.readOnly) {
+                unlockInput(cur);          // Enter #1: request keyboard
+              } else {
+                submitInput(cur);          // Enter #2: submit + hide keyboard
+                finishEditing(cur);
               }
-            } else if (cur !== dom.linkInput) {
+            } else {
               cur.click();
             }
           } else {
@@ -1508,6 +1549,13 @@
             if (items.length) items[0].focus();
           }
           return;
+        }
+
+        if (editing) {
+          // Left/Right belong to the text caret while typing
+          if (action === window.Input.ACTIONS.LEFT || action === window.Input.ACTIONS.RIGHT) return;
+          // Up/Down leave the field (and hide the keyboard) before navigating
+          finishEditing(curEl);
         }
 
         var dirMap = {
@@ -1592,6 +1640,10 @@
     dom.root.classList.remove('sp-open');
     if (dom.backdrop) dom.backdrop.classList.remove('sp-open');
     S.open = false;
+
+    // Make sure no keyboard is left open and inputs are locked again
+    if (dom.searchInput) dom.searchInput.blur();
+    if (dom.linkInput) dom.linkInput.blur();
 
     // 1. Restore background screen container interactivity
     var screenContainer = document.getElementById('screen-container');
