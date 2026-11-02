@@ -280,8 +280,8 @@ window.RunScreen = (function () {
     iframe.style.position = 'fixed';
     iframe.style.top = '0px';
     iframe.style.left = '0px';
-    iframe.style.width = '1px';
-    iframe.style.height = '1px';
+    iframe.style.width = '1920px';
+    iframe.style.height = '1080px';
     iframe.style.opacity = '0';
     iframe.style.pointerEvents = 'none';
     iframe.style.zIndex = '-999';
@@ -366,7 +366,7 @@ window.RunScreen = (function () {
               type: 'yt-config',
               rate: initialRate,
               fps: 15,
-              width: 480
+              width: 1080
             }, '*');
             S.lastSentRate = initialRate;
             S.lastPostTime = performance.now();
@@ -1048,7 +1048,9 @@ window.RunScreen = (function () {
     document.getElementById('app').appendChild(layerEl);
     document.getElementById('app').classList.add('run-mode');
 
-    ctx = canvas.getContext('2d', { alpha: false });
+ctx = canvas.getContext('2d', { alpha: false });
+ctx.imageSmoothingEnabled = true;
+ctx.imageSmoothingQuality = 'high';
     ctx.fillStyle = '#05070c';
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
