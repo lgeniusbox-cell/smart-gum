@@ -380,7 +380,7 @@ window.RunScreen = (function () {
 
   const frame = data.frame;               // VideoFrame sent by the injected script
   if (!frame) break;                      // ignore messages without a frame
-
+console.log('frame');
   S.firstFrameReceived = true;
   S.fallbackActive = false;
 
