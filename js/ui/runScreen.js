@@ -2,76 +2,81 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * MatPad TV - Virtual Run (Treadmill) Screen
- * - Step events (from Java) -> steps, speed, cadence, distance, calories
- * - Frames are PULLED from Java (Android.pollFrame) and drawn on a canvas,
- *   at a rate that follows the player's running speed (slow motion when still)
- * - Hydration alert, session history (best speed), summary
- *
- * Java -> JS API (window.MatPadRun):
- *   onStep(epochMs?)        one call per step on the mat
- *   onFrame(urlOrBase64)    optional push (pull is the default)
- *   setFrameInfo({fps})     source fps of the video
- *   onHydrate()             show water / breathing alert
- * Java -> JS events (MatPadApp.onNativeEvent):
- *   hydrate | run_loading {percent} | run_error {message} | run_ended
+ * MatPad TV - Virtual Run (Treadmill) Screen with YouTube Integration
+ * - Embedded hidden YouTube iframe driven by cross-origin injected script
+ * - Video playback rate dynamically controlled by player's cadence
+ * - ImageBitmap transfer over postMessage drawn to hardware-accelerated canvas
+ * - Cadence speed model: EMA smoothing, idle pause, dead-zone filtering
+ * - Debug HUD (Cadence, Rate, FPS) + Desktop Dev Mode Step Simulator
  */
 
 window.RunScreen = (function () {
   'use strict';
 
+  // Configurable Speed Model & Runtime Constants
   const DEFAULTS = {
-    MIN_RATE: 0.06,      // playback rate when the player stands still (very slow)
-    MAX_RATE: 1.8,       // playback rate cap
-    REF_SPEED: 8,        // km/h at which the video plays at normal speed (rate 1.0)
-    SRC_FPS: 30,         // source fps (override with setFrameInfo)
-    MAX_QUEUE: 60,       // max frames buffered in JS
-    PULL_MS: 33,         // how often we ask Java for frames
-    PULL_BURST: 4,       // max frames fetched per pull tick
-    MIN_STEP_GAP: 150,   // ms, ignore faster step events (mat bounce)
-    IDLE_RESET: 3000,    // ms without step => considered stopped
-    SPEED_WINDOW: 4,     // steps used to average the speed
-    MAX_SPEED: 25,       // km/h sanity cap
-    HYDRATE_MS: 10000
+    BASE_CADENCE_SPM: 120, // Steps per minute that equals normal speed (1.0x playbackRate)
+    MIN_RATE: 0.25,        // Clamped minimum playback rate while moving
+    MAX_RATE: 3.0,         // Clamped maximum playback rate at high cadence
+    EMA_ALPHA: 0.25,       // Smoothing factor for exponential moving average
+    RATE_DEAD_ZONE: 0.03,  // Minimum delta required to send new rate (avoids jitter)
+    IDLE_MS: 2000,         // Inactivity threshold (ms): runner stopped -> send rate 0 (pause)
+    MIN_STEP_GAP: 150,     // Debounce filter for mat bounce (ms)
+    STEP_WINDOW_SIZE: 6,   // Rolling step window size used to compute cadence
+    MAX_SPEED: 25,         // Sanity cap for speed in km/h
+    HYDRATE_MS: 10000,     // Duration for hydration/breathing overlay (ms)
+    ENABLE_FRAME_BUFFER: false, // Optional ring buffer for frames
+    MAX_BUFFER_FRAMES: 60, // Maximum frames retained when ring buffer is active
+    REF_SPEED: 8           // Reference km/h
   };
+
   const CFG = Object.assign({}, DEFAULTS, (window.CONFIG && window.CONFIG.RUN) || {});
 
-  // [km/h, MET] - linearly interpolated
-  const MET_TABLE = [[0, 1.5], [3, 2.5], [4.5, 3.5], [6, 5], [8, 8.3], [9.7, 9.8],
-                     [11, 11], [12.8, 12.8], [14.5, 14.8], [16, 16], [19, 19]];
+  // Metabolic Equivalent of Task (MET) interpolation table [km/h, MET]
+  const MET_TABLE = [
+    [0, 1.5], [3, 2.5], [4.5, 3.5], [6, 5], [8, 8.3], [9.7, 9.8],
+    [11, 11], [12.8, 12.8], [14.5, 14.8], [16, 16], [19, 19]
+  ];
 
-  const CANVAS_W = 1280, CANVAS_H = 720;
+  const CANVAS_W = 1280;
+  const CANVAS_H = 720;
 
-  let S = null;            // session state (null when the screen is not mounted)
-  let R = {};              // cached DOM refs
-  let canvas = null, ctx = null, layerEl = null;
-  let rafId = null, tickId = null, pullId = null;
-  let confirmModal = null, summaryModal = null;
-  let keyHandler = null, nativeHandler = null;
+  // Session state container
+  let S = null;
+  let R = {}; // Cached DOM element references
+  let canvas = null;
+  let ctx = null;
+  let layerEl = null;
+  let devPanelEl = null;
+  let devToggleBtn = null;
+  let rafId = null;
+  let tickId = null;
+  let confirmModal = null;
+  let summaryModal = null;
+  let keyHandler = null;
+  let nativeHandler = null;
+  let messageHandler = null;
+
+  // Frame ring buffer (exposed when ENABLE_FRAME_BUFFER is true)
+  const ringBuffer = [];
 
   const t = (k, v) => window.t(k, v);
   const clockText = (d) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   function fmt(sec) {
     sec = Math.max(0, Math.floor(sec));
-    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-    const mm = String(m).padStart(2, '0'), ss = String(s).padStart(2, '0');
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    const mm = String(m).padStart(2, '0');
+    const ss = String(s).padStart(2, '0');
     return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
   }
 
-  function releaseUrl(u) {
-    if (typeof u === 'string' && u.indexOf('blob:') === 0) {
-      try { URL.revokeObjectURL(u); } catch (e) {}
-    }
-  }
-
-  /* ----------------------------------------------------------------------
-     Physiology helpers
-     ---------------------------------------------------------------------- */
   function getStepLength(p) {
-    if (!p) return 0.7;
+    if (!p) return 0.72;
     const age = p.age || 30;
-    if (age < 18) return Math.min(0.75, 0.2 + 0.035 * age);   // metres per step
+    if (age < 18) return Math.min(0.75, 0.2 + 0.035 * age);
     return p.sex === 'female' ? 0.68 : 0.76;
   }
 
@@ -80,8 +85,9 @@ window.RunScreen = (function () {
     if (v <= T[0][0]) return T[0][1];
     for (let i = 1; i < T.length; i++) {
       if (v <= T[i][0]) {
-        const a = T[i - 1], b = T[i];
-        return a[1] + (b[1] - a[1]) * (v - a[0]) / (b[0] - a[0]);
+        const a = T[i - 1];
+        const b = T[i];
+        return a[1] + ((b[1] - a[1]) * (v - a[0])) / (b[0] - a[0]);
       }
     }
     return T[T.length - 1][1];
@@ -93,199 +99,450 @@ window.RunScreen = (function () {
     return 1;
   }
 
-  /* ----------------------------------------------------------------------
-     INPUT FROM JAVA
-     ---------------------------------------------------------------------- */
+  /* --------------------------------------------------------------------------
+     YOUTUBE URL / ID PARSER
+     Extracts 11-char video ID from youtu.be, watch?v=, shorts, embed, or bare ID
+     -------------------------------------------------------------------------- */
+  function extractVideoId(input) {
+    if (!input) return '';
+    const clean = String(input).trim();
+    if (/^[a-zA-Z0-9_-]{11}$/.test(clean)) return clean;
+    const match = clean.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|v\/))([a-zA-Z0-9_-]{11})/i);
+    if (match && match[1]) return match[1];
+    try {
+      const url = new URL(clean);
+      if (url.searchParams.has('v')) return url.searchParams.get('v');
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length) return parts[parts.length - 1];
+    } catch (e) {}
+    return clean;
+  }
 
-  // Called by Java for every step on the mat. ts = epoch ms (optional).
-  function onStep(ts) {
+  /* --------------------------------------------------------------------------
+     FRAME BUFFER (Optional Ring Buffer)
+     -------------------------------------------------------------------------- */
+  function pushToFrameBuffer(bmp, mediaTime) {
+    if (!CFG.ENABLE_FRAME_BUFFER) return;
+    ringBuffer.push({ bmp, mediaTime });
+    while (ringBuffer.length > CFG.MAX_BUFFER_FRAMES) {
+      const evicted = ringBuffer.shift();
+      if (evicted && evicted.bmp && typeof evicted.bmp.close === 'function') {
+        try { evicted.bmp.close(); } catch (e) {}
+      }
+    }
+  }
+
+  function clearFrameBuffer() {
+    ringBuffer.forEach(item => {
+      if (item && item.bmp && typeof item.bmp.close === 'function') {
+        try { item.bmp.close(); } catch (e) {}
+      }
+    });
+    ringBuffer.length = 0;
+  }
+
+  /* --------------------------------------------------------------------------
+     THROTTLED POSTMESSAGE TO YOUTUBE IFRAME
+     Throttled to maximum ~5 messages per second (~200ms interval)
+     -------------------------------------------------------------------------- */
+  function sendRateToIframe(rate, force = false) {
+    if (!S || !S.ytIframe || !S.ytIframe.contentWindow) return;
+
+    const now = performance.now();
+    const MIN_INTERVAL_MS = 200; // 5 calls/sec maximum
+
+    const postNow = (targetRate) => {
+      S.lastSentRate = targetRate;
+      S.lastPostTime = performance.now();
+      try {
+        S.ytIframe.contentWindow.postMessage({ type: 'yt-config', rate: targetRate }, '*');
+      } catch (err) {
+        console.warn('[YT Run] postMessage to iframe failed:', err);
+      }
+    };
+
+    if (force) {
+      if (S.throttleTimer) {
+        clearTimeout(S.throttleTimer);
+        S.throttleTimer = null;
+      }
+      S.pendingRate = null;
+      postNow(rate);
+      return;
+    }
+
+    // Dead-zone filter: avoid jitter if rate difference is smaller than 0.03
+    if (S.lastSentRate !== null && rate !== 0 && S.lastSentRate !== 0) {
+      if (Math.abs(rate - S.lastSentRate) < CFG.RATE_DEAD_ZONE) {
+        return;
+      }
+    }
+
+    const elapsed = now - S.lastPostTime;
+    if (elapsed >= MIN_INTERVAL_MS) {
+      if (S.throttleTimer) {
+        clearTimeout(S.throttleTimer);
+        S.throttleTimer = null;
+      }
+      S.pendingRate = null;
+      postNow(rate);
+    } else {
+      S.pendingRate = rate;
+      if (!S.throttleTimer) {
+        S.throttleTimer = setTimeout(() => {
+          S.throttleTimer = null;
+          if (S && S.pendingRate !== null) {
+            const r = S.pendingRate;
+            S.pendingRate = null;
+            postNow(r);
+          }
+        }, MIN_INTERVAL_MS - elapsed);
+      }
+    }
+  }
+
+  /* --------------------------------------------------------------------------
+     SPEED MODEL & STEP PROCESSOR
+     Called for each step taken on the mat or simulated via dev tools
+     -------------------------------------------------------------------------- */
+  function onStep(optionalParam) {
     if (!S || S.finished) return;
+
+    const nowPerf = performance.now();
     const nowReal = Date.now();
-    const v = Number(ts);
-    const now = (v && Math.abs(v - nowReal) < 5000) ? v : nowReal;
 
-    const gap = now - S.lastStepAt;
-    if (S.lastStepAt && gap < CFG.MIN_STEP_GAP) return;          // bounce
-    if (S.lastStepAt && gap > CFG.IDLE_RESET) S.win = [];         // restarted after a stop
+    // 1) Mat bounce filter: ignore events with gap < MIN_STEP_GAP (150ms)
+    if (S.lastStepPerfAt && (nowPerf - S.lastStepPerfAt) < CFG.MIN_STEP_GAP) {
+      return;
+    }
 
-    S.win.push(now);
-    if (S.win.length > CFG.SPEED_WINDOW) S.win.shift();
-    S.lastStepAt = now;
+    // 2) Idle state recovery: if paused/idle, resume smoothly
+    const wasIdle = S.isIdle || (S.lastStepPerfAt > 0 && (nowPerf - S.lastStepPerfAt) > CFG.IDLE_MS);
+    if (wasIdle) {
+      S.isIdle = false;
+      S.stepTimes = []; // Clear old window timestamps after stopping
+      // Resume smoothly from rate ~1.0 or last active rate
+      if (S.smoothedRate < CFG.MIN_RATE) {
+        S.smoothedRate = 1.0;
+      }
+    }
+
+    S.lastStepPerfAt = nowPerf;
+    S.lastStepAt = nowReal;
     S.steps++;
     S.distance += S.stepLen;
 
-    if (S.win.length >= 2) {
-      const span = (S.win[S.win.length - 1] - S.win[0]) / 1000;
-      S.stepInterval = span / (S.win.length - 1);
-      S.cadence = 60 / S.stepInterval;
-      S.speedTarget = Math.min(CFG.MAX_SPEED, (S.stepLen / S.stepInterval) * 3.6);
+    // 3) Rolling window of last ~6 step timestamps (using performance.now())
+    S.stepTimes.push(nowPerf);
+    if (S.stepTimes.length > CFG.STEP_WINDOW_SIZE) {
+      S.stepTimes.shift();
     }
+
+    // 4) Compute cadence (Steps Per Minute)
+    if (S.stepTimes.length >= 2) {
+      const spanMs = S.stepTimes[S.stepTimes.length - 1] - S.stepTimes[0];
+      const intervals = S.stepTimes.length - 1;
+      if (spanMs > 0 && intervals > 0) {
+        const avgIntervalSec = (spanMs / intervals) / 1000;
+        S.cadence = 60 / avgIntervalSec;
+      }
+    } else {
+      // First step after resuming
+      S.cadence = CFG.BASE_CADENCE_SPM;
+    }
+
+    // 5) Rate calculation: cadence / BASE_CADENCE_SPM
+    const rawRate = S.cadence / CFG.BASE_CADENCE_SPM;
+    const clampedRate = Math.min(CFG.MAX_RATE, Math.max(CFG.MIN_RATE, rawRate));
+
+    // Exponential Moving Average (EMA) smoothing (alpha = 0.25)
+    S.smoothedRate = (CFG.EMA_ALPHA * clampedRate) + ((1 - CFG.EMA_ALPHA) * S.smoothedRate);
+    S.rate = S.smoothedRate;
+
+    // 6) Align speed (km/h) for HUD stats: speed = (cadence * stepLen * 60) / 1000
+    S.speedTarget = Math.min(CFG.MAX_SPEED, S.cadence * S.stepLen * 0.06);
+
+    // 7) Dispatch updated playback rate to iframe
+    sendRateToIframe(S.rate);
+
     renderStats();
   }
 
-  // Push API (optional): a blob:/https: URL or a base64 JPEG string.
-  // Returns false when the buffer is full.
-  function onFrame(data) {
-    if (!S || !data) return false;
-    if (S.queue.length >= CFG.MAX_QUEUE) return false;
-    S.queue.push(data);
-    S.lastFrameAt = Date.now();
-    pump();
-    return true;
+  /* --------------------------------------------------------------------------
+     YOUTUBE IFRAME LIFECYCLE & VIDEO LOADING
+     -------------------------------------------------------------------------- */
+  function createHiddenIframe() {
+    if (S.ytIframe) return;
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'yt-video-embed';
+    // Rendered but invisible: opacity: 0, small size, pointer-events: none. NOT display: none
+    iframe.style.position = 'fixed';
+    iframe.style.top = '0px';
+    iframe.style.left = '0px';
+    iframe.style.width = '1px';
+    iframe.style.height = '1px';
+    iframe.style.opacity = '0';
+    iframe.style.pointerEvents = 'none';
+    iframe.style.zIndex = '-999';
+    iframe.style.border = 'none';
+    iframe.setAttribute('allow', 'autoplay; encrypted-media');
+    iframe.setAttribute('tabindex', '-1');
+    iframe.setAttribute('aria-hidden', 'true');
+
+    document.body.appendChild(iframe);
+    S.ytIframe = iframe;
   }
 
-  // Pull API: ask Java for frames while we have room.
-  // Android.pollFrame() returns byte[] (arrives as an array of signed numbers)
-  // or a base64 String when Java is configured with USE_BASE64.
-  function pullFrames() {
-    if (!S || S.finished) return;
-    const A = window.Android;
-    if (!A || !A.pollFrame) return;
-    let n = 0;
-    while (getBufferSize() < CFG.MAX_QUEUE && n < CFG.PULL_BURST) {
-      let res;
-      try { res = A.pollFrame(); } catch (e) { return; }
-      if (!res || !res.length) return;                  // nothing ready yet
-      let src;
-      if (typeof res === 'string') {
-        src = res;                                      // base64
-      } else {
-        // signed bytes (-128..127) wrap correctly into Uint8Array
-        src = URL.createObjectURL(new Blob([Uint8Array.from(res)], { type: 'image/jpeg' }));
+  function startFallbackTimer() {
+    if (S.loadTimeoutId) clearTimeout(S.loadTimeoutId);
+    S.loadTimeoutId = setTimeout(() => {
+      if (!S || S.firstFrameReceived) return;
+      activateFallback('Video unavailable or embedding disabled');
+    }, 5000);
+  }
+
+  function activateFallback(reason) {
+    if (!S) return;
+    S.fallbackActive = true;
+    S.statusMsg = reason || 'Video unavailable or embedding disabled';
+    updateStatus();
+    if (window.Notify) {
+      window.Notify.show({
+        type: 'warning',
+        title: 'Virtual Run Fallback',
+        message: S.statusMsg,
+        duration: 5000
+      });
+    }
+  }
+
+  function loadVideo(urlOrId) {
+    const videoId = extractVideoId(urlOrId) || 'aZqQmzHLliQ';
+    if (!S) return;
+
+    S.currentVideoId = videoId;
+    S.firstFrameReceived = false;
+    S.fallbackActive = false;
+    S.frameCount = 0;
+    S.frameTimes = [];
+    S.fps = 0;
+
+    createHiddenIframe();
+    startFallbackTimer();
+
+    const origin = encodeURIComponent(window.location.origin);
+    const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&playsinline=1&rel=0&modestbranding=1&enablejsapi=1&origin=${origin}`;
+    S.ytIframe.src = embedUrl;
+
+    if (R.dbgStatus) {
+      R.dbgStatus.className = 'run-debug-status-tag run-status-loading';
+      R.dbgStatus.textContent = 'CONNECTING';
+    }
+    updateStatus();
+  }
+
+  /* --------------------------------------------------------------------------
+     CROSS-ORIGIN POSTMESSAGE PROTOCOL (Iframe <-> Page)
+     Validates e.origin is https://www.youtube.com or https://www.youtube-nocookie.com
+     -------------------------------------------------------------------------- */
+  function onWindowMessage(e) {
+    const isYtOrigin = e.origin === 'https://www.youtube.com' || e.origin === 'https://www.youtube-nocookie.com';
+    const isDevOrigin = (isDevModeActive() && e.origin === window.location.origin);
+
+    if (!isYtOrigin && !isDevOrigin) return;
+    const data = e.data;
+    if (!data || typeof data !== 'object') return;
+    if (!S) return;
+
+    switch (data.type) {
+      case 'yt-ready': {
+        S.ytReady = true;
+        // On 'yt-ready', immediately send {type:'yt-config', rate:<current rate>, fps:15, width:480}
+        const initialRate = S.isIdle ? 0 : (S.rate || 1.0);
+        try {
+          if (S.ytIframe && S.ytIframe.contentWindow) {
+            S.ytIframe.contentWindow.postMessage({
+              type: 'yt-config',
+              rate: initialRate,
+              fps: 15,
+              width: 480
+            }, '*');
+            S.lastSentRate = initialRate;
+            S.lastPostTime = performance.now();
+          }
+        } catch (err) {}
+        break;
       }
-      if (!onFrame(src)) { releaseUrl(src); return; }
-      n++;
+
+      case 'yt-frame': {
+        if (S.loadTimeoutId) {
+          clearTimeout(S.loadTimeoutId);
+          S.loadTimeoutId = null;
+        }
+        S.firstFrameReceived = true;
+        S.fallbackActive = false;
+
+        // Rolling frames-per-second tracker
+        const now = performance.now();
+        S.frameTimes.push(now);
+        while (S.frameTimes.length && S.frameTimes[0] < now - 1000) {
+          S.frameTimes.shift();
+        }
+        S.fps = S.frameTimes.length;
+
+        const bmp = data.bmp;
+        if (bmp) {
+          if (CFG.ENABLE_FRAME_BUFFER) {
+            pushToFrameBuffer(bmp, data.t || 0);
+          } else {
+            // Memory hygiene: close the previous bitmap to prevent GPU RAM leaks
+            if (S.currentBitmap && S.currentBitmap !== bmp) {
+              try { S.currentBitmap.close(); } catch (err) {}
+            }
+          }
+          S.currentBitmap = bmp;
+          S.frameCount++;
+          S.lastFrameAt = now;
+        }
+        break;
+      }
+
+      case 'yt-error': {
+        console.warn('[YT Run] YouTube iframe error:', data.msg);
+        if (!S.firstFrameReceived) {
+          activateFallback(data.msg || 'Embedding disabled or video error');
+        }
+        break;
+      }
     }
   }
 
-  function setFrameInfo(info) {
-    if (S && info && info.fps > 0) S.srcFps = info.fps;
+  /* --------------------------------------------------------------------------
+     FRAME RENDERING ON CANVAS
+     -------------------------------------------------------------------------- */
+  function drawCoverBitmap(bmp) {
+    if (!bmp) return;
+    const bw = bmp.width;
+    const bh = bmp.height;
+    if (!bw || !bh) return;
+    const s = Math.max(CANVAS_W / bw, CANVAS_H / bh);
+    const w = bw * s;
+    const h = bh * s;
+    ctx.drawImage(bmp, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
   }
 
-  function onHydrate() {
-    if (!R.hydrate || !S) return;
-    R.hydrate.classList.add('show');
-    clearTimeout(S.hydrateTimer);
-    S.hydrateTimer = setTimeout(() => R.hydrate && R.hydrate.classList.remove('show'), CFG.HYDRATE_MS);
+  function drawLoadingPlaceholder() {
+    ctx.fillStyle = '#05070c';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    ctx.fillStyle = '#00e5ff';
+    ctx.font = '800 28px Outfit, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Loading video...', CANVAS_W / 2, CANVAS_H / 2 - 10);
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.font = '600 16px Outfit, sans-serif';
+    ctx.fillText('Syncing runner footage with MatPad steps', CANVAS_W / 2, CANVAS_H / 2 + 28);
   }
 
-  function getBufferSize() {
-    return S ? S.queue.length + S.ready.length : 0;
-  }
-
-  /* ----------------------------------------------------------------------
-     FRAME PIPELINE (small decode-ahead so the main thread never blocks)
-     ---------------------------------------------------------------------- */
-  function pump() {
-    while (S.ready.length < 3 && S.queue.length) {
-      const data = S.queue.shift();
-      const img = new Image();
-      const entry = { img, ok: false, bad: false };
-      img.decoding = 'async';
-      img.src = /^(data:|https?:|blob:|file:)/.test(data) ? data : 'data:image/jpeg;base64,' + data;
-      img.decode().then(() => { entry.ok = true; }).catch(() => { entry.bad = true; });
-      S.ready.push(entry);
-    }
-  }
-
-  function drawCover(img) {
-    const iw = img.naturalWidth, ih = img.naturalHeight;
-    if (!iw || !ih) return;
-    const s = Math.max(CANVAS_W / iw, CANVAS_H / ih);
-    const w = iw * s, h = ih * s;
-    ctx.drawImage(img, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
-  }
-
-  // Procedural road, only used in a desktop browser without Java (for testing)
   function drawDemo(dt) {
     S.demoOffset = (S.demoOffset + dt * (40 + S.rate * 700)) % 120;
     const g = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-    g.addColorStop(0, '#0b1d3a'); g.addColorStop(0.45, '#1c3f6e');
-    g.addColorStop(0.46, '#10151f'); g.addColorStop(1, '#05070c');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-    ctx.fillStyle = 'rgba(0,229,255,0.5)';
+    g.addColorStop(0, '#0b1d3a');
+    g.addColorStop(0.45, '#1c3f6e');
+    g.addColorStop(0.46, '#10151f');
+    g.addColorStop(1, '#05070c');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    ctx.fillStyle = 'rgba(0, 229, 255, 0.55)';
     for (let i = 0; i < 8; i++) {
-      const p = ((i * 120 + S.demoOffset) % 960) / 960;      // 0 = horizon, 1 = near
+      const p = ((i * 120 + S.demoOffset) % 960) / 960;
       const y = CANVAS_H * 0.46 + p * p * CANVAS_H * 0.54;
-      const w = 6 + p * p * 60, h = 4 + p * p * 70;
+      const w = 6 + p * p * 60;
+      const h = 4 + p * p * 70;
       ctx.fillRect(CANVAS_W / 2 - w / 2, y, w, h);
+    }
+
+    if (S.fallbackActive) {
+      ctx.fillStyle = 'rgba(255, 23, 68, 0.85)';
+      ctx.font = '700 18px JetBrains Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`FALLBACK BACKGROUND: ${S.statusMsg}`, CANVAS_W / 2, 45);
     }
   }
 
-  /* ----------------------------------------------------------------------
-     MAIN LOOP
-     ---------------------------------------------------------------------- */
+  /* --------------------------------------------------------------------------
+     MAIN ANIMATION & HUD LOOP (requestAnimationFrame)
+     -------------------------------------------------------------------------- */
   function loop(ts) {
     rafId = requestAnimationFrame(loop);
     if (!S) return;
+
     const dt = Math.min(0.1, Math.max(0, (ts - S.lastT) / 1000));
     S.lastT = ts;
-    const now = Date.now();
+    const nowPerf = performance.now();
 
-    // 1) speed: smooth, and decays on its own when steps stop arriving
-    let target = S.speedTarget;
-    const since = now - S.lastStepAt;
-    if (!S.lastStepAt || since > CFG.IDLE_RESET) {
-      target = 0;
-    } else if (since > Math.max(1200, S.stepInterval * 1000 * 1.6)) {
-      target = Math.min(target, (S.stepLen / (since / 1000)) * 3.6);
+    // 1) Idle detection: if no step arrives for IDLE_MS (2000ms), player stopped -> send rate 0
+    const timeSinceStep = nowPerf - S.lastStepPerfAt;
+    if (S.lastStepPerfAt > 0 && timeSinceStep > CFG.IDLE_MS) {
+      if (!S.isIdle) {
+        S.isIdle = true;
+        S.cadence = 0;
+        S.speedTarget = 0;
+        sendRateToIframe(0, true); // Send rate 0 (pause video) immediately
+      }
     }
-    S.speed += (target - S.speed) * Math.min(1, dt * 3);
-    if (target === 0 && S.speed < 0.3) S.speed = 0;
 
+    // 2) Smooth runner speed interpolation for statistics
+    const targetSpeed = S.isIdle ? 0 : S.speedTarget;
+    S.speed += (targetSpeed - S.speed) * Math.min(1, dt * 3.2);
+    if (targetSpeed === 0 && S.speed < 0.25) S.speed = 0;
+
+    // Check personal record
     if (S.speed > S.maxSpeed) {
       S.maxSpeed = S.speed;
       if (S.lastBest > 0 && !S.recordShown && S.maxSpeed > S.lastBest + 0.05) {
         S.recordShown = true;
         if (window.Notify) {
-          window.Notify.show({ type: 'success', title: t('run_new_record'),
-            message: S.maxSpeed.toFixed(1) + ' km/h', duration: 3500 });
+          window.Notify.show({
+            type: 'success',
+            title: t('run_new_record'),
+            message: S.maxSpeed.toFixed(1) + ' km/h',
+            duration: 3500
+          });
         }
       }
     }
 
-    // 2) video rate follows speed (never 0: slow motion when standing still)
-    const targetRate = Math.min(CFG.MAX_RATE, CFG.MIN_RATE + (1 - CFG.MIN_RATE) * (S.speed / CFG.REF_SPEED));
-    S.rate += (targetRate - S.rate) * Math.min(1, dt * 2.5);
-
+    // Accumulate workout session time and calories
     if (!S.finished) {
-      S.videoTime += dt * S.rate;
+      S.videoTime += dt * (S.isIdle ? 0 : S.rate);
       if (S.speed >= 1.5) {
-        // kcal/min = MET * 3.5 * weight(kg) / 200
         S.kcal += met(S.speed) * 3.5 * S.weight / 200 * (dt / 60) * S.ageFactor;
       }
       if (S.videoTime >= S.total) finishRun();
     }
 
-    // 3) draw frames at (srcFps * rate)
-    pump();
-    S.acc += dt * S.rate * S.srcFps;
-    let frame = null;
-    while (S.acc >= 1) {
-      while (S.ready.length && S.ready[0].bad) releaseUrl(S.ready.shift().img.src);
-      const e = S.ready[0];
-      if (!e || !e.ok) { S.acc = Math.min(S.acc, 1); break; }   // wait for decode / data
-      if (frame) releaseUrl(frame.src);                          // skipped frame
-      frame = S.ready.shift().img;
-      S.acc -= 1;
-    }
-    if (frame) {
-      drawCover(frame);
-      releaseUrl(frame.src);
-      S.frameCount++;
-    } else if (S.frameCount === 0 && !window.Bridge.isAvailable()) {
+    // 3) Draw canvas background
+    if (S.currentBitmap && !S.fallbackActive) {
+      drawCoverBitmap(S.currentBitmap);
+    } else if (S.fallbackActive) {
       drawDemo(dt);
+    } else {
+      drawLoadingPlaceholder();
     }
   }
 
-  /* ----------------------------------------------------------------------
-     UI
-     ---------------------------------------------------------------------- */
+  /* --------------------------------------------------------------------------
+     STATS & DEBUG HUD RENDERING
+     -------------------------------------------------------------------------- */
   function renderStats() {
     if (!S || !R.speed) return;
     R.speed.textContent = S.speed.toFixed(1);
     R.speedSub.textContent = `${t('run_max')} ${S.maxSpeed.toFixed(1)} · ${t('run_last_best')} ${S.lastBest ? S.lastBest.toFixed(1) : '--'}`;
-    R.cadence.textContent = S.speed > 0 ? Math.round(S.cadence) : 0;
+    R.cadence.textContent = Math.round(S.cadence);
     R.steps.textContent = S.steps;
     R.distance.textContent = (S.distance / 1000).toFixed(2);
     R.kcal.textContent = Math.round(S.kcal);
@@ -293,9 +550,32 @@ window.RunScreen = (function () {
     R.progress.style.transform = `scaleX(${Math.min(1, S.videoTime / S.total)})`;
   }
 
+  function renderDebugHud() {
+    if (!S || !R.dbgCadence) return;
+    R.dbgCadence.textContent = Math.round(S.cadence);
+    R.dbgRate.textContent = (S.isIdle ? 0 : S.rate).toFixed(2);
+    R.dbgFps.textContent = S.fps.toFixed(1);
+
+    if (R.dbgStatus) {
+      if (S.fallbackActive) {
+        R.dbgStatus.className = 'run-debug-status-tag run-status-fallback';
+        R.dbgStatus.textContent = 'FALLBACK';
+      } else if (!S.firstFrameReceived) {
+        R.dbgStatus.className = 'run-debug-status-tag run-status-loading';
+        R.dbgStatus.textContent = 'BUFFERING';
+      } else if (S.isIdle) {
+        R.dbgStatus.className = 'run-debug-status-tag run-status-idle';
+        R.dbgStatus.textContent = 'IDLE (PAUSED)';
+      } else {
+        R.dbgStatus.className = 'run-debug-status-tag run-status-streaming';
+        R.dbgStatus.textContent = 'STREAMING';
+      }
+    }
+  }
+
   function updateStatus() {
     if (!R.status || !S) return;
-    const waiting = S.frameCount === 0 && window.Bridge.isAvailable();
+    const waiting = !S.firstFrameReceived && !S.fallbackActive;
     const msg = S.statusMsg || (waiting ? t('run_buffering') : '');
     if (msg !== S.statusShown) {
       S.statusShown = msg;
@@ -307,22 +587,213 @@ window.RunScreen = (function () {
   function tick() {
     if (!S) return;
     renderStats();
+    renderDebugHud();
+
     const c = clockText(new Date());
     if (R.clock && R.clock.textContent !== c) R.clock.textContent = c;
 
-    // Frames are arriving => clear any loading / error message
-    if (S.frameCount > 0 && S.statusMsg && !S.errorShown) S.statusMsg = '';
+    if (S.firstFrameReceived && S.statusMsg && !S.errorShown) {
+      S.statusMsg = '';
+    }
     updateStatus();
 
     S.tickCount++;
-    if (S.tickCount % 2 === 0 && window.Bridge.isAvailable()) {
+    if (S.tickCount % 2 === 0 && window.Bridge && window.Bridge.isAvailable()) {
       window.Bridge.onRunBuffer({
-        size: getBufferSize(), max: CFG.MAX_QUEUE,
-        rate: +S.rate.toFixed(2), fps: S.srcFps, speed: +S.speed.toFixed(1)
+        size: S.frameCount,
+        max: CFG.MAX_BUFFER_FRAMES,
+        rate: +(S.isIdle ? 0 : S.rate).toFixed(2),
+        fps: S.fps,
+        speed: +S.speed.toFixed(1)
       });
     }
   }
 
+  /* --------------------------------------------------------------------------
+     DEV MODE: STEP SIMULATOR & MOCK VIDEO STREAM (when ?dev=1 or desktop)
+     -------------------------------------------------------------------------- */
+  function isDevModeActive() {
+    return (typeof window.Android === 'undefined') ||
+      new URLSearchParams(window.location.search).has('dev') ||
+      window.location.search.includes('dev=1');
+  }
+
+  let simIntervalId = null;
+  let mockStreamIntervalId = null;
+  let mockOffscreenCanvas = null;
+  let mockOffscreenCtx = null;
+  let mockStreamAngle = 0;
+
+  function stopStepSimulation() {
+    if (simIntervalId) {
+      clearInterval(simIntervalId);
+      simIntervalId = null;
+    }
+    if (R.devBtnWalk) R.devBtnWalk.classList.remove('active');
+    if (R.devBtnJog) R.devBtnJog.classList.remove('active');
+    if (R.devBtnSprint) R.devBtnSprint.classList.remove('active');
+  }
+
+  function startStepSimulation(spm, activeBtn) {
+    stopStepSimulation();
+    if (activeBtn) activeBtn.classList.add('active');
+    const intervalMs = Math.round(60000 / spm);
+    onStep(); // immediate step
+    simIntervalId = setInterval(() => {
+      onStep();
+    }, intervalMs);
+  }
+
+  // Desktop standalone test feed (generates and transfers ImageBitmaps via postMessage)
+  function toggleMockVideoStream() {
+    if (mockStreamIntervalId) {
+      clearInterval(mockStreamIntervalId);
+      mockStreamIntervalId = null;
+      if (R.devBtnMockFeed) {
+        R.devBtnMockFeed.classList.remove('active');
+        R.devBtnMockFeed.textContent = 'Mock Stream: OFF';
+      }
+      return;
+    }
+
+    if (!mockOffscreenCanvas) {
+      mockOffscreenCanvas = document.createElement('canvas');
+      mockOffscreenCanvas.width = 480;
+      mockOffscreenCanvas.height = 270;
+      mockOffscreenCtx = mockOffscreenCanvas.getContext('2d');
+    }
+
+    if (R.devBtnMockFeed) {
+      R.devBtnMockFeed.classList.add('active');
+      R.devBtnMockFeed.textContent = 'Mock Stream: ON';
+    }
+
+    mockStreamIntervalId = setInterval(async () => {
+      if (!S || S.finished) return;
+      const rate = S.isIdle ? 0 : S.rate;
+      mockStreamAngle += 0.05 * (rate || 0.1);
+
+      // Render colorful simulated trail footage on offscreen canvas
+      const w = 480;
+      const h = 270;
+      const g = mockOffscreenCtx.createLinearGradient(0, 0, w, h);
+      g.addColorStop(0, '#00172d');
+      g.addColorStop(0.5, '#0b3c5d');
+      g.addColorStop(1, '#1d2731');
+      mockOffscreenCtx.fillStyle = g;
+      mockOffscreenCtx.fillRect(0, 0, w, h);
+
+      // Procedural road perspective lines
+      mockOffscreenCtx.strokeStyle = '#00e5ff';
+      mockOffscreenCtx.lineWidth = 3;
+      mockOffscreenCtx.beginPath();
+      mockOffscreenCtx.moveTo(w / 2, h * 0.45);
+      mockOffscreenCtx.lineTo(w * 0.1, h);
+      mockOffscreenCtx.moveTo(w / 2, h * 0.45);
+      mockOffscreenCtx.lineTo(w * 0.9, h);
+      mockOffscreenCtx.stroke();
+
+      // Moving road dashes
+      const dashY = ((mockStreamAngle * 120) % (h * 0.55)) + (h * 0.45);
+      mockOffscreenCtx.fillStyle = '#ffffff';
+      mockOffscreenCtx.fillRect(w / 2 - 4, dashY, 8, 22);
+
+      // Watermark
+      mockOffscreenCtx.fillStyle = '#00e5ff';
+      mockOffscreenCtx.font = '700 14px monospace';
+      mockOffscreenCtx.fillText(`[MOCK YT STREAM] SPEED: ${rate.toFixed(2)}x`, 16, 28);
+
+      try {
+        const bmp = await createImageBitmap(mockOffscreenCanvas);
+        // Post frame to messageHandler matching the exact injected script contract
+        window.postMessage({
+          type: 'yt-frame',
+          bmp,
+          t: performance.now() / 1000,
+          w,
+          h
+        }, window.location.origin, [bmp]);
+      } catch (err) {}
+    }, 1000 / 15);
+  }
+
+  function setupDevPanel(container) {
+    if (!isDevModeActive()) return;
+
+    devToggleBtn = document.createElement('button');
+    devToggleBtn.type = 'button';
+    devToggleBtn.className = 'run-dev-toggle-btn focusable';
+    devToggleBtn.textContent = 'DEV TOOLS';
+    container.appendChild(devToggleBtn);
+
+    devPanelEl = document.createElement('div');
+    devPanelEl.className = 'run-dev-panel';
+    devPanelEl.innerHTML = `
+      <div class="run-dev-row">
+        <span class="run-dev-badge">DEV MODE</span>
+        <button type="button" class="run-dev-btn focusable" id="dev-btn-step">+1 Step (S)</button>
+        <button type="button" class="run-dev-btn focusable" id="dev-btn-walk">Walk 85 SPM (W)</button>
+        <button type="button" class="run-dev-btn focusable" id="dev-btn-jog">Jog 135 SPM (J)</button>
+        <button type="button" class="run-dev-btn focusable" id="dev-btn-sprint">Sprint 180 SPM (R)</button>
+        <button type="button" class="run-dev-btn run-dev-btn-danger focusable" id="dev-btn-stop">Stop (X)</button>
+      </div>
+      <div class="run-dev-row">
+        <div class="run-dev-input-group">
+          <input type="text" class="run-dev-input focusable" id="dev-yt-input" placeholder="YouTube URL or Video ID" />
+          <button type="button" class="run-dev-btn focusable" id="dev-btn-load-yt">Load Video</button>
+        </div>
+        <button type="button" class="run-dev-btn focusable" id="dev-btn-mock-feed">Mock Stream: OFF</button>
+        <button type="button" class="run-dev-btn focusable" id="dev-btn-cap-frame">Save Frame PNG</button>
+      </div>
+    `;
+    container.appendChild(devPanelEl);
+
+    R.devBtnWalk = devPanelEl.querySelector('#dev-btn-walk');
+    R.devBtnJog = devPanelEl.querySelector('#dev-btn-jog');
+    R.devBtnSprint = devPanelEl.querySelector('#dev-btn-sprint');
+    R.devBtnStop = devPanelEl.querySelector('#dev-btn-stop');
+    R.devBtnStep = devPanelEl.querySelector('#dev-btn-step');
+    R.devBtnMockFeed = devPanelEl.querySelector('#dev-btn-mock-feed');
+    const inputYt = devPanelEl.querySelector('#dev-yt-input');
+    const loadYtBtn = devPanelEl.querySelector('#dev-btn-load-yt');
+    const capFrameBtn = devPanelEl.querySelector('#dev-btn-cap-frame');
+
+    if (inputYt && S.item) {
+      inputYt.value = S.item.url || S.item.videoId || 'aZqQmzHLliQ';
+    }
+
+    devToggleBtn.addEventListener('click', () => {
+      devPanelEl.style.display = devPanelEl.style.display === 'none' ? 'flex' : 'none';
+    });
+
+    R.devBtnStep.addEventListener('click', () => onStep());
+    R.devBtnWalk.addEventListener('click', () => startStepSimulation(85, R.devBtnWalk));
+    R.devBtnJog.addEventListener('click', () => startStepSimulation(135, R.devBtnJog));
+    R.devBtnSprint.addEventListener('click', () => startStepSimulation(180, R.devBtnSprint));
+    R.devBtnStop.addEventListener('click', () => {
+      stopStepSimulation();
+      if (S) {
+        S.isIdle = true;
+        S.cadence = 0;
+        S.speedTarget = 0;
+        sendRateToIframe(0, true);
+        renderStats();
+        renderDebugHud();
+      }
+    });
+
+    loadYtBtn.addEventListener('click', () => {
+      const val = inputYt.value.trim();
+      if (val) loadVideo(val);
+    });
+
+    R.devBtnMockFeed.addEventListener('click', toggleMockVideoStream);
+    capFrameBtn.addEventListener('click', () => window.downloadCurrentFrame('run-frame-capture.png'));
+  }
+
+  /* --------------------------------------------------------------------------
+     MODALS & DIALOGS
+     -------------------------------------------------------------------------- */
   function makeModal(id, inner) {
     const el = document.createElement('div');
     el.id = id;
@@ -362,6 +833,12 @@ window.RunScreen = (function () {
   function finishRun() {
     if (!S || S.finished) return;
     S.finished = true;
+    stopStepSimulation();
+    if (mockStreamIntervalId) {
+      clearInterval(mockStreamIntervalId);
+      mockStreamIntervalId = null;
+    }
+    sendRateToIframe(0, true);
     finalize();
     buildSummary();
     openModal(summaryModal);
@@ -381,39 +858,83 @@ window.RunScreen = (function () {
       endedAt: Date.now()
     };
     if (S.steps > 0) window.Storage.set(`run_last_${S.profileId}`, summary);
-    window.Bridge.onRunStopped(summary);
+    if (window.Bridge && window.Bridge.onRunStopped) {
+      window.Bridge.onRunStopped(summary);
+    }
   }
 
-  /* ----------------------------------------------------------------------
-     Lifecycle
-     ---------------------------------------------------------------------- */
+  function onHydrate() {
+    if (!R.hydrate || !S) return;
+    R.hydrate.classList.add('show');
+    clearTimeout(S.hydrateTimer);
+    S.hydrateTimer = setTimeout(() => R.hydrate && R.hydrate.classList.remove('show'), CFG.HYDRATE_MS);
+  }
+
+  /* --------------------------------------------------------------------------
+     SCREEN LIFECYCLE (onMount, onBack, onLeave)
+     -------------------------------------------------------------------------- */
   async function onMount(container, params = {}) {
-    const item = params.item || { title: 'Virtual Run', duration: 1800 };
-    const profile = window.Profiles.getActiveProfile() || (window.Profiles.getAll()[0] || null);
-    if (profile) window.Theme.applyProfileTheme(profile);
+    const item = params.item || { title: 'Virtual Run', duration: 1800, url: 'https://youtu.be/aZqQmzHLliQ' };
+    const profile = (window.Profiles && window.Profiles.getActiveProfile()) ||
+      (window.Profiles && window.Profiles.getAll()[0]) || null;
+    if (profile && window.Theme) window.Theme.applyProfileTheme(profile);
 
     const profileId = profile ? profile.id : 'guest';
     const last = await window.Storage.get(`run_last_${profileId}`);
     const total = (item.trim && item.trim.end > item.trim.start)
       ? item.trim.end - item.trim.start
       : (item.duration || 1800);
-    const now = Date.now();
+    const nowReal = Date.now();
+    const nowPerf = performance.now();
 
     S = {
-      item, profileId, total,
+      item,
+      profileId,
+      total,
       weight: (profile && profile.weight) || 60,
       ageFactor: ageFactor((profile && profile.age) || 30),
       stepLen: getStepLength(profile),
-      startAt: now,
-      steps: 0, distance: 0, kcal: 0,
-      speed: 0, speedTarget: 0, maxSpeed: 0, cadence: 0, stepInterval: 1,
-      lastBest: last && last.maxSpeed ? last.maxSpeed : 0, recordShown: false,
-      lastStepAt: 0, win: [],
-      rate: CFG.MIN_RATE, videoTime: 0, acc: 0, srcFps: item.fps || CFG.SRC_FPS,
-      queue: [], ready: [], frameCount: 0, lastFrameAt: 0, demoOffset: 0,
-      statusMsg: '', statusShown: null, errorShown: false,
-      lastT: performance.now(), tickCount: 0,
-      finished: false, saved: false, allowExit: false, hydrateTimer: null
+      startAt: nowReal,
+      steps: 0,
+      distance: 0,
+      kcal: 0,
+      speed: 0,
+      speedTarget: 0,
+      maxSpeed: 0,
+      cadence: 0,
+      lastBest: last && last.maxSpeed ? last.maxSpeed : 0,
+      recordShown: false,
+      lastStepAt: 0,
+      lastStepPerfAt: 0,
+      stepTimes: [],
+      isIdle: false,
+      rate: 1.0,
+      smoothedRate: 1.0,
+      lastSentRate: null,
+      lastPostTime: 0,
+      pendingRate: null,
+      throttleTimer: null,
+      videoTime: 0,
+      currentBitmap: null,
+      frameCount: 0,
+      frameTimes: [],
+      fps: 0,
+      ytIframe: null,
+      ytReady: false,
+      currentVideoId: '',
+      firstFrameReceived: false,
+      fallbackActive: false,
+      loadTimeoutId: null,
+      demoOffset: 0,
+      statusMsg: '',
+      statusShown: null,
+      errorShown: false,
+      lastT: nowPerf,
+      tickCount: 0,
+      finished: false,
+      saved: false,
+      allowExit: false,
+      hydrateTimer: null
     };
 
     container.innerHTML = `
@@ -427,6 +948,30 @@ window.RunScreen = (function () {
             ${item.place ? `<span class="badge badge-child">${window.Utils.escapeHTML(item.place)}</span>` : ''}
           </div>
         </div>
+
+        <!-- Debug HUD: Cadence, Rate, Frames/sec -->
+        <div class="run-debug-hud" id="run-debug-hud">
+          <div class="run-debug-pill">
+            <span class="run-debug-lbl">CADENCE:</span>
+            <span class="run-debug-val" id="rs-dbg-cadence">0</span>
+            <span class="run-debug-lbl">SPM</span>
+          </div>
+          <div class="run-debug-divider"></div>
+          <div class="run-debug-pill run-debug-pill-highlight">
+            <span class="run-debug-lbl">RATE:</span>
+            <span class="run-debug-val" id="rs-dbg-rate">1.00</span>
+            <span class="run-debug-lbl">x</span>
+          </div>
+          <div class="run-debug-divider"></div>
+          <div class="run-debug-pill">
+            <span class="run-debug-lbl">STREAM:</span>
+            <span class="run-debug-val" id="rs-dbg-fps">0.0</span>
+            <span class="run-debug-lbl">FPS</span>
+          </div>
+          <div class="run-debug-divider"></div>
+          <span class="run-debug-status-tag run-status-loading" id="rs-dbg-status">STANDBY</span>
+        </div>
+
         <div class="run-clock" id="run-clock">${clockText(new Date())}</div>
       </div>
 
@@ -466,7 +1011,7 @@ window.RunScreen = (function () {
           <div class="run-tile">
             <div class="run-tile-label">${t('run_time')}</div>
             <div class="run-tile-value" id="rs-time">00:00</div>
-            <div class="run-tile-sub">${t('run_total')} ${fmt(total)} · ${t('run_started')} ${clockText(new Date(now))}</div>
+            <div class="run-tile-sub">${t('run_total')} ${fmt(total)} · ${t('run_started')} ${clockText(new Date(nowReal))}</div>
           </div>
         </div>
         <div class="run-progress"><div class="run-progress-fill" id="rs-progress"></div></div>
@@ -474,26 +1019,41 @@ window.RunScreen = (function () {
     `;
 
     R = {
-      speed: container.querySelector('#rs-speed'), speedSub: container.querySelector('#rs-speed-sub'),
-      cadence: container.querySelector('#rs-cadence'), steps: container.querySelector('#rs-steps'),
-      distance: container.querySelector('#rs-distance'), kcal: container.querySelector('#rs-kcal'),
-      time: container.querySelector('#rs-time'), progress: container.querySelector('#rs-progress'),
-      clock: container.querySelector('#run-clock'), hydrate: container.querySelector('#run-hydrate'),
-      status: container.querySelector('#run-status')
+      speed: container.querySelector('#rs-speed'),
+      speedSub: container.querySelector('#rs-speed-sub'),
+      cadence: container.querySelector('#rs-cadence'),
+      steps: container.querySelector('#rs-steps'),
+      distance: container.querySelector('#rs-distance'),
+      kcal: container.querySelector('#rs-kcal'),
+      time: container.querySelector('#rs-time'),
+      progress: container.querySelector('#rs-progress'),
+      clock: container.querySelector('#run-clock'),
+      hydrate: container.querySelector('#run-hydrate'),
+      status: container.querySelector('#run-status'),
+      dbgCadence: container.querySelector('#rs-dbg-cadence'),
+      dbgRate: container.querySelector('#rs-dbg-rate'),
+      dbgFps: container.querySelector('#rs-dbg-fps'),
+      dbgStatus: container.querySelector('#rs-dbg-status')
     };
 
     container.querySelector('#run-end-btn').addEventListener('click', () => openModal(confirmModal));
 
-    // Video layer lives under the screen (the screen has safe-area margins, the video is full-bleed)
+    // Hardware accelerated video canvas layer
     layerEl = document.createElement('div');
     layerEl.id = 'run-video-layer';
     canvas = document.createElement('canvas');
-    canvas.width = CANVAS_W; canvas.height = CANVAS_H;
+    canvas.width = CANVAS_W;
+    canvas.height = CANVAS_H;
     layerEl.appendChild(canvas);
     document.getElementById('app').appendChild(layerEl);
     document.getElementById('app').classList.add('run-mode');
+
     ctx = canvas.getContext('2d', { alpha: false });
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.fillStyle = '#05070c';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // Setup dev panel if running on desktop or with ?dev=1
+    setupDevPanel(container);
 
     confirmModal = makeModal('run-confirm-modal', `
       <div class="modal-title">${t('run_end_title')}</div>
@@ -514,7 +1074,11 @@ window.RunScreen = (function () {
     R.sumBody = summaryModal.querySelector('#run-sum-body');
     summaryModal.querySelector('#run-sum-btn').addEventListener('click', () => { closeModal(summaryModal); exitRun(); });
 
-    // Events from Java
+    // Listen for postMessage from the YouTube iframe
+    messageHandler = onWindowMessage;
+    window.addEventListener('message', messageHandler);
+
+    // Listen for Android native bridge events
     nativeHandler = (e) => {
       const d = e.detail || {};
       const p = d.payload || {};
@@ -538,44 +1102,111 @@ window.RunScreen = (function () {
     };
     window.addEventListener('matpad:nativeEvent', nativeHandler);
 
-    // Desktop testing: tap "S" about 3 times per second
+    // Keyboard shortcuts for rapid testing and TV navigation
     keyHandler = (e) => {
-      if ((e.key === 's' || e.key === 'S') && !window.Bridge.isAvailable()) onStep();
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+        return;
+      }
+      const k = e.key.toLowerCase();
+      if (k === 's') {
+        onStep();
+      } else if (k === 'w') {
+        startStepSimulation(85, R.devBtnWalk);
+      } else if (k === 'j') {
+        startStepSimulation(135, R.devBtnJog);
+      } else if (k === 'r') {
+        startStepSimulation(180, R.devBtnSprint);
+      } else if (k === 'x' || k === ' ') {
+        stopStepSimulation();
+        if (S) {
+          S.isIdle = true;
+          S.cadence = 0;
+          S.speedTarget = 0;
+          sendRateToIframe(0, true);
+        }
+      } else if (k === 'd') {
+        if (devPanelEl) {
+          devPanelEl.style.display = devPanelEl.style.display === 'none' ? 'flex' : 'none';
+        }
+      }
     };
     window.addEventListener('keydown', keyHandler);
 
+    // Load video designated by current trail item
+    const videoTarget = item.url || item.videoId || 'aZqQmzHLliQ';
+    loadVideo(videoTarget);
+
     renderStats();
+    renderDebugHud();
     tickId = setInterval(tick, 250);
-    pullId = setInterval(pullFrames, CFG.PULL_MS);
     S.lastT = performance.now();
     rafId = requestAnimationFrame(loop);
   }
 
   function onBack() {
     if (!S || S.allowExit) return false;
-    if (summaryModal && summaryModal.classList.contains('active')) { closeModal(summaryModal); exitRun(); return true; }
-    if (confirmModal && confirmModal.classList.contains('active')) { closeModal(confirmModal); return true; }
+    if (summaryModal && summaryModal.classList.contains('active')) {
+      closeModal(summaryModal);
+      exitRun();
+      return true;
+    }
+    if (confirmModal && confirmModal.classList.contains('active')) {
+      closeModal(confirmModal);
+      return true;
+    }
     openModal(confirmModal);
     return true;
   }
 
   function onLeave() {
     finalize();
+    stopStepSimulation();
+
+    if (mockStreamIntervalId) {
+      clearInterval(mockStreamIntervalId);
+      mockStreamIntervalId = null;
+    }
+
     if (rafId) cancelAnimationFrame(rafId);
     if (tickId) clearInterval(tickId);
-    if (pullId) clearInterval(pullId);
-    rafId = tickId = pullId = null;
+    rafId = tickId = null;
+
     if (S) {
       clearTimeout(S.hydrateTimer);
-      S.queue.forEach(releaseUrl);
-      S.ready.forEach(e => releaseUrl(e.img.src));
+      clearTimeout(S.loadTimeoutId);
+      clearTimeout(S.throttleTimer);
+
+      if (S.currentBitmap && typeof S.currentBitmap.close === 'function') {
+        try { S.currentBitmap.close(); } catch (e) {}
+        S.currentBitmap = null;
+      }
+
+      // Teardown YouTube iframe
+      if (S.ytIframe) {
+        try {
+          S.ytIframe.src = 'about:blank';
+          if (S.ytIframe.parentNode) {
+            S.ytIframe.parentNode.removeChild(S.ytIframe);
+          }
+        } catch (e) {}
+        S.ytIframe = null;
+      }
     }
+
+    clearFrameBuffer();
+
     if (keyHandler) window.removeEventListener('keydown', keyHandler);
     if (nativeHandler) window.removeEventListener('matpad:nativeEvent', nativeHandler);
-    [layerEl, confirmModal, summaryModal].forEach(el => el && el.parentNode && el.parentNode.removeChild(el));
+    if (messageHandler) window.removeEventListener('message', messageHandler);
+
+    [layerEl, devPanelEl, devToggleBtn, confirmModal, summaryModal].forEach(el => {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+
     const app = document.getElementById('app');
     if (app) app.classList.remove('run-mode');
-    layerEl = confirmModal = summaryModal = canvas = ctx = null;
+
+    layerEl = devPanelEl = devToggleBtn = confirmModal = summaryModal = canvas = ctx = null;
     R = {};
     S = null;
   }
@@ -584,8 +1215,51 @@ window.RunScreen = (function () {
     return container.querySelector('#run-end-btn');
   }
 
-  // Public API for Java: webView.evaluateJavascript("MatPadRun.onStep()", null)
-  window.MatPadRun = { onStep, onFrame, setFrameInfo, onHydrate, getBufferSize };
+  /* --------------------------------------------------------------------------
+     GLOBAL CONTRACTS & HOOKS
+     Preserve and wrap window.onStep for Android evaluateJavascript calls
+     -------------------------------------------------------------------------- */
+  const existingOnStep = window.onStep;
+  window.onStep = function (optionalArg) {
+    if (typeof existingOnStep === 'function') {
+      try { existingOnStep(optionalArg); } catch (e) {}
+    }
+    onStep(optionalArg);
+  };
 
-  return { onMount, onBack, onLeave, getDefaultFocus };
+  // Expose Frame Buffer inspection and PNG capture
+  window.getBufferedFrames = function () {
+    return ringBuffer;
+  };
+
+  window.downloadCurrentFrame = function (filename = 'matpad-run-frame.png') {
+    if (!canvas) return;
+    try {
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          if (a.parentNode) a.parentNode.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 1000);
+      }, 'image/png');
+    } catch (e) {
+      console.warn('[YT Run] downloadCurrentFrame failed:', e);
+    }
+  };
+
+  // Maintain backward compatibility for Java bridge
+  window.MatPadRun = {
+    onStep: window.onStep,
+    onHydrate,
+    loadVideo,
+    getBufferSize: () => (S && S.frameCount) || 0
+  };
+
+  return { onMount, onBack, onLeave, getDefaultFocus, loadVideo };
 })();
