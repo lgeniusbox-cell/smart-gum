@@ -376,6 +376,8 @@ window.RunScreen = (function () {
       }
 
   case 'yt-frame': {
+    console.log('frame');
+
   if (S.loadTimeoutId) { clearTimeout(S.loadTimeoutId); S.loadTimeoutId = null; }
 
   const frame = data.frame;               // VideoFrame sent by the injected script
