@@ -375,38 +375,29 @@ window.RunScreen = (function () {
         break;
       }
 
-      case 'yt-frame': {
-        if (S.loadTimeoutId) {
-          clearTimeout(S.loadTimeoutId);
-          S.loadTimeoutId = null;
-        }
-        S.firstFrameReceived = true;
-        S.fallbackActive = false;
+  case 'yt-frame': {
+  if (S.loadTimeoutId) { clearTimeout(S.loadTimeoutId); S.loadTimeoutId = null; }
 
-        // Rolling frames-per-second tracker
-        const now = performance.now();
-        S.frameTimes.push(now);
-        while (S.frameTimes.length && S.frameTimes[0] < now - 1000) {
-          S.frameTimes.shift();
-        }
-        S.fps = S.frameTimes.length;
+  const frame = data.frame;               // VideoFrame sent by the injected script
+  if (!frame) break;                      // ignore messages without a frame
 
-        const bmp = data.bmp;
-        if (bmp) {
-          if (CFG.ENABLE_FRAME_BUFFER) {
-            pushToFrameBuffer(bmp, data.t || 0);
-          } else {
-            // Memory hygiene: close the previous bitmap to prevent GPU RAM leaks
-            if (S.currentBitmap && S.currentBitmap !== bmp) {
-              try { S.currentBitmap.close(); } catch (err) {}
-            }
-          }
-          S.currentBitmap = bmp;
-          S.frameCount++;
-          S.lastFrameAt = now;
-        }
-        break;
-      }
+  S.firstFrameReceived = true;
+  S.fallbackActive = false;
+
+  const now = performance.now();
+  S.frameTimes.push(now);
+  while (S.frameTimes.length && S.frameTimes[0] < now - 1000) S.frameTimes.shift();
+  S.fps = S.frameTimes.length;
+
+  // Close the previous frame, otherwise the decoder runs out of buffers and playback stalls
+  if (S.currentBitmap && S.currentBitmap !== frame) {
+    try { S.currentBitmap.close(); } catch (err) {}
+  }
+  S.currentBitmap = frame;
+  S.frameCount++;
+  S.lastFrameAt = now;
+  break;
+}
 
       case 'yt-error': {
         console.warn('[YT Run] YouTube iframe error:', data.msg);
@@ -421,16 +412,15 @@ window.RunScreen = (function () {
   /* --------------------------------------------------------------------------
      FRAME RENDERING ON CANVAS
      -------------------------------------------------------------------------- */
-  function drawCoverBitmap(bmp) {
-    if (!bmp) return;
-    const bw = bmp.width;
-    const bh = bmp.height;
-    if (!bw || !bh) return;
-    const s = Math.max(CANVAS_W / bw, CANVAS_H / bh);
-    const w = bw * s;
-    const h = bh * s;
-    ctx.drawImage(bmp, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
-  }
+function drawCoverBitmap(frame) {
+  if (!frame) return;
+  const bw = frame.displayWidth;
+  const bh = frame.displayHeight;
+  if (!bw || !bh) return;
+  const s = Math.max(CANVAS_W / bw, CANVAS_H / bh);
+  const w = bw * s, h = bh * s;
+  ctx.drawImage(frame, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
+}
 
   function drawLoadingPlaceholder() {
     ctx.fillStyle = '#05070c';
