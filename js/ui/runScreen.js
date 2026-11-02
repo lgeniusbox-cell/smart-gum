@@ -348,9 +348,9 @@ window.RunScreen = (function () {
      -------------------------------------------------------------------------- */
   function onWindowMessage(e) {
     const isYtOrigin = e.origin === 'https://www.youtube.com' || e.origin === 'https://www.youtube-nocookie.com';
-    const isDevOrigin = (isDevModeActive() && e.origin === window.location.origin);
+    //const isDevOrigin = (isDevModeActive() && e.origin === window.location.origin);
 
-    if (!isYtOrigin && !isDevOrigin) return;
+    if (!isYtOrigin)return; //&& !isDevOrigin) return;
     const data = e.data;
     if (!data || typeof data !== 'object') return;
     if (!S) return;
