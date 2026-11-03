@@ -350,7 +350,7 @@ window.RunScreen = (function () {
     const isYtOrigin = e.origin === 'https://www.youtube.com' || e.origin === 'https://www.youtube-nocookie.com';
     //const isDevOrigin = (isDevModeActive() && e.origin === window.location.origin);
 
-    if (!isYtOrigin)return; //&& !isDevOrigin) return;
+    //if (!isYtOrigin)return; //&& !isDevOrigin) return;
     const data = e.data;
     if (!data || typeof data !== 'object') return;
     if (!S) return;
@@ -376,13 +376,13 @@ window.RunScreen = (function () {
       }
 
   case 'yt-frame': {
-    console.log('frame');
+    //console.log('frame');
 
   if (S.loadTimeoutId) { clearTimeout(S.loadTimeoutId); S.loadTimeoutId = null; }
 
   const frame = data.frame;               // VideoFrame sent by the injected script
   if (!frame) break;                      // ignore messages without a frame
-console.log('frame');
+//console.log('frame');
   S.firstFrameReceived = true;
   S.fallbackActive = false;
 
