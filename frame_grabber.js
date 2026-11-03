@@ -86,11 +86,7 @@
     post({ type: 'yt-ready' });
   }
 
-  // Get the <video> the moment YouTube calls play(); "this" is the video element
-  HTMLMediaElement.prototype.play = function () {
-    if (this instanceof HTMLVideoElement) attach(this);
-    return nativePlay.apply(this, arguments);    // must return the original promise
-  };
+ 
 
   // Fallback in case autoplay starts without a play() call
   var existing = document.querySelector('video');
