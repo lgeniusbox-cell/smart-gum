@@ -332,7 +332,7 @@ window.RunScreen = (function () {
     startFallbackTimer();
 
     const origin = encodeURIComponent(window.location.origin);
-    const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&playsinline=1&rel=0&modestbranding=1&enablejsapi=1&origin=${origin}`;
+    const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&playsinline=1&rel=0&modestbranding=1&enablejsapi=1`;
     S.ytIframe.src = embedUrl;
 
     if (R.dbgStatus) {
