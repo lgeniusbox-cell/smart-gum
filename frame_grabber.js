@@ -57,7 +57,9 @@
         h: video.videoHeight,
         srcW: video.videoWidth,
         srcH: video.videoHeight
-      }, [frame]);                         // transfer: frame is detached here after this call
+      }, [frame]);       
+      frame.close();
+      // transfer: frame is detached here after this call
       sent++;
       if (sent === 1 || sent % 100 === 0) console.log(TAG, 'frames posted:', sent);
     } catch (err) {
