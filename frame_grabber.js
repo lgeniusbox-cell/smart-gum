@@ -1,9 +1,9 @@
 (function () {
   // Run only in the embed frame that is a direct child of our page
-  if (window === window.top || window.parent !== window.top) return;
+  //if (window === window.top || window.parent !== window.top) return;
 
   var TAG = '[YT-INJ vf]';
-  var parentOrigin = (location.ancestorOrigins && location.ancestorOrigins[0]) || '*';
+  var parentOrigin = '*';//(location.ancestorOrigins && location.ancestorOrigins[0]) || '*';
   var cfg = { fps: 15, rate: 1 };
   var video = null, lastSent = 0, sent = 0, failed = 0;
   var nativePlay = HTMLMediaElement.prototype.play;
@@ -58,7 +58,7 @@
         srcW: video.videoWidth,
         srcH: video.videoHeight
       }, [frame]);       
-      frame.close();
+     // frame.close();
       // transfer: frame is detached here after this call
       sent++;
       if (sent === 1 || sent % 100 === 0) console.log(TAG, 'frames posted:', sent);
