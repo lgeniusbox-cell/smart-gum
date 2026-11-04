@@ -1,65 +1,94 @@
 /**
- * YouTube iframe injected script (document-start, YouTube origins only)
+ * YouTube iframe injected script v2 (document-start, YouTube origins only)
  *
- * - Hides the whole YouTube UI and the <video> element (hidden=true + CSS),
- *   which avoids the buffering problems some TVs have with a visible video.
- * - Draws the video on its OWN <canvas> inside the iframe: ctx.drawImage(video, ...)
- *   The iframe itself is the visible background of the main page.
- * - No frame is sent to the main page. Only small status messages are.
+ * Stage 1: video starts normally, our opaque canvas covers the page.
+ * Stage 2: once frames are being drawn, hide the <video> + YouTube UI
+ *          (hidden=true + CSS) to avoid TV buffering problems.
+ * Diagnostics are sent to the main page as { type:'yt-log', msg }.
  *
- * Messages from main  -> iframe: yt-config {rate, fps} | yt-snapshot
- * Messages iframe -> main:      yt-ready | yt-first-frame | yt-stats | yt-buffering
- *                               | yt-error | yt-snapshot-result
+ * main -> iframe: yt-config {rate, fps, hide} | yt-snapshot
+ * iframe -> main: yt-ready | yt-first-frame | yt-stats | yt-buffering
+ *                 | yt-error | yt-log | yt-snapshot-result
  */
 (function () {
-  if (window === window.top) return;     // only inside the embed frame
-  if (window.__ytInjCanvas) return;      // never run twice
+  if (window === window.top) return;
+  if (window.__ytInjCanvas) return;
   window.__ytInjCanvas = true;
 
   var TAG = '[YT-INJ canvas]';
-  var W = 1280, H = 720;                 // canvas backing size (CSS scales it to the iframe)
-  var cfg = { fps: 30, rate: 1 };
-  var video = null, canvas = null, ctx = null;
+  var W = 1280, H = 720;
+  var HIDE_AFTER_FRAMES = 5;
+  var cfg = { fps: 30, rate: 1, hide: true };
+  var video = null, canvas = null, ctx = null, hideStyle = null;
   var lastDraw = 0, lastTime = -1, drawn = 0, fpsCount = 0, fpsStart = performance.now();
-  var firstFrameSent = false, attachTimer = null;
+  var firstFrameSent = false, hidden = false, attachTimer = null, lastKick = 0;
   var nativePlay = HTMLMediaElement.prototype.play;
 
-  function post(msg) {
-    try { window.parent.postMessage(msg, '*'); } catch (e) {}
+  function post(msg) { try { window.parent.postMessage(msg, '*'); } catch (e) {} }
+  function log(m) {
+    console.log(TAG, m);
+    post({ type: 'yt-log', msg: String(m) });
+  }
+
+  window.addEventListener('error', function (e) { log('JS error: ' + e.message); });
+
+  // ---------------------------------------------------------------------
+  // DOM setup (waits for <html> if the script runs very early)
+  // ---------------------------------------------------------------------
+  function setupDom() {
+    if (canvas) return true;
+    var root = document.documentElement;
+    if (!root) return false;
+
+    var st = document.createElement('style');
+    st.textContent =
+      'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important}' +
+      '#yt-canvas{position:fixed!important;top:0!important;left:0!important;' +
+      'width:100vw!important;height:100vh!important;display:block!important;' +
+      'z-index:2147483647!important;pointer-events:none!important;background:#000!important}';
+    root.appendChild(st);
+
+    canvas = document.createElement('canvas');
+    canvas.id = 'yt-canvas';
+    canvas.width = W;
+    canvas.height = H;
+    root.appendChild(canvas);
+    ctx = canvas.getContext('2d', { alpha: false });
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    log('dom ready');
+    return true;
+  }
+
+  // Stage 2: hide video + YouTube UI
+  function hideEverything() {
+    if (hidden || !cfg.hide || !video) return;
+    hidden = true;
+    hideStyle = document.createElement('style');
+    hideStyle.textContent =
+      'body{display:none!important}' +
+      'video{display:none!important;visibility:hidden!important}';
+    document.documentElement.appendChild(hideStyle);
+    video.hidden = true;
+    video.style.setProperty('display', 'none', 'important');
+    video.style.setProperty('visibility', 'hidden', 'important');
+    log('video + UI hidden');
+    setTimeout(applyRate, 300); // make sure it still plays
+  }
+
+  function showEverything() {
+    if (!hidden) return;
+    hidden = false;
+    if (hideStyle && hideStyle.parentNode) hideStyle.parentNode.removeChild(hideStyle);
+    if (video) {
+      video.hidden = false;
+      video.style.removeProperty('display');
+      video.style.removeProperty('visibility');
+    }
   }
 
   // ---------------------------------------------------------------------
-  // 1) Hide everything except our canvas
-  // ---------------------------------------------------------------------
-  var style = document.createElement('style');
-  style.textContent =
-    'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important}' +
-    'body{display:none!important}' +                       // whole YouTube UI
-    'video{display:none!important;visibility:hidden!important}' +
-    '#yt-canvas{position:fixed!important;top:0!important;left:0!important;' +
-    'width:100vw!important;height:100vh!important;display:block!important;' +
-    'z-index:2147483647!important;pointer-events:none!important;background:#000!important}';
-  (document.head || document.documentElement).appendChild(style);
-
-  canvas = document.createElement('canvas');
-  canvas.id = 'yt-canvas';
-  canvas.width = W;
-  canvas.height = H;
-  document.documentElement.appendChild(canvas);            // child of <html>, not <body>
-  ctx = canvas.getContext('2d', { alpha: false });
-  ctx.imageSmoothingEnabled = true;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, W, H);
-
-  function hideVideo(v) {
-    v.hidden = true;
-    v.muted = true;
-    v.style.setProperty('display', 'none', 'important');
-    v.style.setProperty('visibility', 'hidden', 'important');
-  }
-
-  // ---------------------------------------------------------------------
-  // 2) Playback rate control (rate <= 0 means pause)
+  // Rate control (rate <= 0 = pause)
   // ---------------------------------------------------------------------
   function applyRate() {
     if (!video) return;
@@ -67,7 +96,11 @@
       if (!video.paused) video.pause();
       return;
     }
-    if (video.paused) nativePlay.call(video).catch(function () {});
+    video.muted = true;
+    if (video.paused && !video.ended) {
+      var p = nativePlay.call(video);
+      if (p && p.catch) p.catch(function (err) { log('play() rejected: ' + err); });
+    }
     if (Math.abs(video.playbackRate - cfg.rate) > 0.01) video.playbackRate = cfg.rate;
   }
 
@@ -79,16 +112,20 @@
     if (d.type === 'yt-config') {
       if (d.fps) cfg.fps = d.fps;
       if (typeof d.rate === 'number') cfg.rate = d.rate;
+      if (typeof d.hide === 'boolean') {
+        cfg.hide = d.hide;
+        if (!cfg.hide) showEverything();
+      }
       applyRate();
     } else if (d.type === 'yt-snapshot') {
       var url = null;
-      try { url = canvas.toDataURL('image/png'); } catch (err) {}
+      try { url = canvas.toDataURL('image/png'); } catch (err) { log('snapshot failed: ' + err); }
       post({ type: 'yt-snapshot-result', dataUrl: url });
     }
   });
 
   // ---------------------------------------------------------------------
-  // 3) Draw loop: video -> canvas (cover fit)
+  // Draw loop
   // ---------------------------------------------------------------------
   function drawCover() {
     var bw = video.videoWidth, bh = video.videoHeight;
@@ -101,15 +138,23 @@
 
   function loop(now) {
     requestAnimationFrame(loop);
-
-    // YouTube sometimes rebuilds the DOM: make sure our canvas is still there
+    if (!setupDom()) return;
     if (!canvas.isConnected) document.documentElement.appendChild(canvas);
+    if (!video) return;
 
-    if (!video || video.readyState < 2) return;
+    // Not playing although it should? kick it (max once per second)
+    if (cfg.rate > 0 && video.paused && !video.ended && now - lastKick > 1000) {
+      lastKick = now;
+      applyRate();
+      var btn = document.querySelector('.ytp-large-play-button');
+      if (btn) { try { btn.click(); } catch (e) {} }
+    }
+
+    if (video.readyState < 2) return;
     if (now - lastDraw < 1000 / cfg.fps) return;
-    if (video.currentTime === lastTime) return;            // paused / no new frame
-
+    if (video.currentTime === lastTime) return;
     if (!drawCover()) return;
+
     lastDraw = now;
     lastTime = video.currentTime;
     drawn++;
@@ -117,8 +162,11 @@
 
     if (!firstFrameSent) {
       firstFrameSent = true;
+      log('first frame drawn ' + video.videoWidth + 'x' + video.videoHeight);
       post({ type: 'yt-first-frame' });
     }
+    if (drawn === HIDE_AFTER_FRAMES) hideEverything();
+
     if (now - fpsStart >= 1000) {
       post({
         type: 'yt-stats',
@@ -133,28 +181,32 @@
   }
 
   // ---------------------------------------------------------------------
-  // 4) Attach to the <video> element
+  // Attach to <video>
   // ---------------------------------------------------------------------
   function attach(v) {
     if (video === v) return;
     video = v;
     lastTime = -1;
-    hideVideo(v);
+    v.muted = true;
+    log('video element found');
 
-    // YouTube may reset these attributes: re-apply
-    new MutationObserver(function () {
-      if (!v.hidden || v.style.display !== 'none') hideVideo(v);
-    }).observe(v, { attributes: true, attributeFilter: ['hidden', 'style'] });
-
+    ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'pause', 'stalled', 'emptied'].forEach(function (ev) {
+      v.addEventListener(ev, function () {
+        log('event ' + ev + ' rs=' + v.readyState + ' paused=' + v.paused);
+      });
+    });
+    v.addEventListener('error', function () {
+      var c = v.error ? v.error.code : '?';
+      log('video error code ' + c);
+      post({ type: 'yt-error', msg: 'video error ' + c });
+    });
     v.addEventListener('ratechange', applyRate);
-    v.addEventListener('pause', function () { if (cfg.rate > 0 && !v.ended) applyRate(); });
+    v.addEventListener('pause', function () { if (cfg.rate > 0 && !v.ended) setTimeout(applyRate, 50); });
     v.addEventListener('loadeddata', function () { lastTime = -1; });
     v.addEventListener('seeked', function () { lastTime = -1; });
     v.addEventListener('waiting', function () { post({ type: 'yt-buffering', value: true }); });
     v.addEventListener('playing', function () { post({ type: 'yt-buffering', value: false }); });
-    v.addEventListener('error', function () { post({ type: 'yt-error', msg: 'video error' }); });
 
-    console.log(TAG, 'attached to <video>');
     post({ type: 'yt-ready' });
   }
 
@@ -163,14 +215,25 @@
     if (v) attach(v);
   }
 
+  setupDom();
   requestAnimationFrame(loop);
   findVideo();
 
-  // Keep watching (throttled) in case YouTube replaces the <video> element
   new MutationObserver(function () {
     if (attachTimer) return;
-    attachTimer = setTimeout(function () { attachTimer = null; findVideo(); }, 500);
+    attachTimer = setTimeout(function () { attachTimer = null; setupDom(); findVideo(); }, 300);
   }).observe(document, { childList: true, subtree: true });
 
-  console.log(TAG, 'loaded');
+  // Heartbeat for the first 20 s: shows exactly where it is stuck
+  var beats = 0;
+  var hb = setInterval(function () {
+    beats++;
+    if (beats > 20 || firstFrameSent) { clearInterval(hb); return; }
+    log('hb ' + beats + ' video=' + !!video +
+        (video ? ' rs=' + video.readyState + ' paused=' + video.paused +
+                 ' w=' + video.videoWidth + ' t=' + video.currentTime.toFixed(1) : '') +
+        ' | ' + location.href.slice(0, 60));
+  }, 1000);
+
+  log('loaded');
 })();
