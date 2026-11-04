@@ -29,6 +29,7 @@ window.RunScreen = (function () {
     HYDRATE_MS: 10000,     // Duration for hydration/breathing overlay (ms)
     MAX_SAFE_RATE: 2.0,    // Above this playback rate: clamp + ask the runner to slow down
     OVERSPEED_WARN_MS: 6000, // Minimum gap between "slow down" toasts (ms)
+    HIDE_VIDEO: true,      // hide <video> + YouTube UI inside the iframe once playing
     DRAW_FPS: 30,          // Canvas draw rate inside the iframe (use 15 on weak TVs)
     REF_SPEED: 8           // Reference km/h
   };
@@ -238,7 +239,8 @@ window.RunScreen = (function () {
     const rawRate = S.cadence / CFG.BASE_CADENCE_SPM;
     const upper = Math.min(CFG.MAX_RATE, CFG.MAX_SAFE_RATE);
     const clampedRate = Math.min(upper, Math.max(CFG.MIN_RATE, rawRate));
-// Overspeed: video buffering gets unreliable on TVs at high rates -> warn + clamp
+
+    // Overspeed: video buffering gets unreliable on TVs at high rates -> warn + clamp
     const over = rawRate > CFG.MAX_SAFE_RATE;
     if (over !== S.overspeed) {
       S.overspeed = over;
@@ -380,15 +382,16 @@ window.RunScreen = (function () {
   }
 
   function onWindowMessage(e) {
-    if (!S || !S.ytIframe || e.source !== S.ytIframe.contentWindow) return;
+    if (!S || !S.ytIframe) return;
     const data = e.data;
     if (!data || typeof data !== 'object') return;
+    if (e.source !== S.ytIframe.contentWindow && !(typeof data.type === 'string' && data.type.indexOf('yt-') === 0)) return;
 
     switch (data.type) {
       case 'yt-ready': {
         S.ytReady = true;
         const initialRate = S.isIdle ? 0 : (S.rate || 1.0);
-        if (postToIframe({ type: 'yt-config', rate: initialRate, fps: CFG.DRAW_FPS })) {
+        if (postToIframe({ type: 'yt-config', rate: initialRate, fps: CFG.DRAW_FPS, hide: CFG.HIDE_VIDEO })) {
           S.lastSentRate = initialRate;
           S.lastPostTime = performance.now();
         }
@@ -414,6 +417,13 @@ window.RunScreen = (function () {
       case 'yt-buffering': {
         S.videoBuffering = !!data.value;
         updateStatus();
+        break;
+      }
+
+      case 'yt-log': {
+        console.log('[YT-INJ]', data.msg);
+        // while no frame yet, show the last injected-script stage on the status line
+        if (!S.firstFrameReceived) { S.statusMsg = String(data.msg).slice(0, 80); updateStatus(); }
         break;
       }
 
@@ -502,7 +512,8 @@ window.RunScreen = (function () {
         updateStatus();
       }
     }
-// 2) Smooth runner speed interpolation for statistics
+
+    // 2) Smooth runner speed interpolation for statistics
     const targetSpeed = S.isIdle ? 0 : S.speedTarget;
     S.speed += (targetSpeed - S.speed) * Math.min(1, dt * 3.2);
     if (targetSpeed === 0 && S.speed < 0.25) S.speed = 0;
@@ -889,7 +900,8 @@ window.RunScreen = (function () {
       allowExit: false,
       hydrateTimer: null
     };
-container.innerHTML = `
+
+    container.innerHTML = `
       <div class="run-top">
         <div class="run-title-block">
           <button type="button" class="back-btn focusable" id="run-end-btn" tabindex="0">
