@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * MatPad TV - Virtual Run (Treadmill) Screen with YouTube Integration
- * - Embedded hidden YouTube iframe driven by cross-origin injected script
+ * - YouTube iframe is the VISIBLE background. The injected script hides the <video>
+ *   and the whole YouTube UI, and draws the frames on its own <canvas> inside the iframe
+ *   (no frame transfer to the main page)
  * - Video playback rate dynamically controlled by player's cadence
- * - ImageBitmap transfer over postMessage drawn to hardware-accelerated canvas
+ * - Overspeed protection: rate clamped to MAX_SAFE_RATE + "slow down" warning
  * - Cadence speed model: EMA smoothing, idle pause, dead-zone filtering
  * - Debug HUD (Cadence, Rate, FPS) + Desktop Dev Mode Step Simulator
  */
@@ -25,8 +27,9 @@ window.RunScreen = (function () {
     STEP_WINDOW_SIZE: 6,   // Rolling step window size used to compute cadence
     MAX_SPEED: 25,         // Sanity cap for speed in km/h
     HYDRATE_MS: 10000,     // Duration for hydration/breathing overlay (ms)
-    ENABLE_FRAME_BUFFER: false, // Optional ring buffer for frames
-    MAX_BUFFER_FRAMES: 60, // Maximum frames retained when ring buffer is active
+    MAX_SAFE_RATE: 2.0,    // Above this playback rate: clamp + ask the runner to slow down
+    OVERSPEED_WARN_MS: 6000, // Minimum gap between "slow down" toasts (ms)
+    DRAW_FPS: 30,          // Canvas draw rate inside the iframe (use 15 on weak TVs)
     REF_SPEED: 8           // Reference km/h
   };
 
@@ -57,10 +60,13 @@ window.RunScreen = (function () {
   let nativeHandler = null;
   let messageHandler = null;
 
-  // Frame ring buffer (exposed when ENABLE_FRAME_BUFFER is true)
-  const ringBuffer = [];
-
   const t = (k, v) => window.t(k, v);
+  // translation with fallback when the key is not defined
+  const tt = (k, fb) => {
+    let v = null;
+    try { v = window.t(k); } catch (e) {}
+    return v && v !== k ? v : fb;
+  };
   const clockText = (d) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   function fmt(sec) {
@@ -116,29 +122,6 @@ window.RunScreen = (function () {
       if (parts.length) return parts[parts.length - 1];
     } catch (e) {}
     return clean;
-  }
-
-  /* --------------------------------------------------------------------------
-     FRAME BUFFER (Optional Ring Buffer)
-     -------------------------------------------------------------------------- */
-  function pushToFrameBuffer(bmp, mediaTime) {
-    if (!CFG.ENABLE_FRAME_BUFFER) return;
-    ringBuffer.push({ bmp, mediaTime });
-    while (ringBuffer.length > CFG.MAX_BUFFER_FRAMES) {
-      const evicted = ringBuffer.shift();
-      if (evicted && evicted.bmp && typeof evicted.bmp.close === 'function') {
-        try { evicted.bmp.close(); } catch (e) {}
-      }
-    }
-  }
-
-  function clearFrameBuffer() {
-    ringBuffer.forEach(item => {
-      if (item && item.bmp && typeof item.bmp.close === 'function') {
-        try { item.bmp.close(); } catch (e) {}
-      }
-    });
-    ringBuffer.length = 0;
   }
 
   /* --------------------------------------------------------------------------
@@ -253,7 +236,25 @@ window.RunScreen = (function () {
 
     // 5) Rate calculation: cadence / BASE_CADENCE_SPM
     const rawRate = S.cadence / CFG.BASE_CADENCE_SPM;
-    const clampedRate = Math.min(CFG.MAX_RATE, Math.max(CFG.MIN_RATE, rawRate));
+    const upper = Math.min(CFG.MAX_RATE, CFG.MAX_SAFE_RATE);
+    const clampedRate = Math.min(upper, Math.max(CFG.MIN_RATE, rawRate));
+// Overspeed: video buffering gets unreliable on TVs at high rates -> warn + clamp
+    const over = rawRate > CFG.MAX_SAFE_RATE;
+    if (over !== S.overspeed) {
+      S.overspeed = over;
+      updateStatus();
+    }
+    if (over && nowPerf - S.lastOverspeedWarn > CFG.OVERSPEED_WARN_MS) {
+      S.lastOverspeedWarn = nowPerf;
+      if (window.Notify) {
+        window.Notify.show({
+          type: 'warning',
+          title: tt('run_slow_down', 'Slow down'),
+          message: tt('run_slow_down_desc', 'Speed too high for smooth video playback'),
+          duration: 3000
+        });
+      }
+    }
 
     // Exponential Moving Average (EMA) smoothing (alpha = 0.25)
     S.smoothedRate = (CFG.EMA_ALPHA * clampedRate) + ((1 - CFG.EMA_ALPHA) * S.smoothedRate);
@@ -271,27 +272,46 @@ window.RunScreen = (function () {
   /* --------------------------------------------------------------------------
      YOUTUBE IFRAME LIFECYCLE & VIDEO LOADING
      -------------------------------------------------------------------------- */
+  // The iframe is now the visible video background. It lives inside the video layer,
+  // BEHIND the main canvas (which only shows loading / fallback) and behind the HUD.
   function createHiddenIframe() {
     if (S.ytIframe) return;
 
+    const host = layerEl || document.body;
+    try {
+      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+    } catch (e) {}
+
     const iframe = document.createElement('iframe');
     iframe.id = 'yt-video-embed';
-    // Rendered but invisible: opacity: 0, small size, pointer-events: none. NOT display: none
-    iframe.style.position = 'fixed';
-    iframe.style.top = '0px';
-    iframe.style.left = '0px';
-    iframe.style.width = '1920px';
-    iframe.style.height = '1080px';
-    iframe.style.opacity = '0';
-    iframe.style.pointerEvents = 'none';
-    iframe.style.zIndex = '-999';
-    iframe.style.border = 'none';
+    Object.assign(iframe.style, {
+      position: 'absolute',
+      top: '0',
+      left: '0',
+      width: '100%',
+      height: '100%',
+      border: 'none',
+      background: '#000',
+      pointerEvents: 'none',
+      zIndex: '0'
+    });
     iframe.setAttribute('allow', 'autoplay; encrypted-media');
     iframe.setAttribute('tabindex', '-1');
     iframe.setAttribute('aria-hidden', 'true');
 
-    document.body.appendChild(iframe);
+    // main canvas sits above the iframe until the first frame is drawn
+    if (canvas) {
+      canvas.style.position = canvas.style.position || 'relative';
+      canvas.style.zIndex = '1';
+      host.insertBefore(iframe, canvas);
+    } else {
+      host.appendChild(iframe);
+    }
     S.ytIframe = iframe;
+  }
+
+  function showMainCanvas(show) {
+    if (canvas) canvas.style.display = show ? 'block' : 'none';
   }
 
   function startFallbackTimer() {
@@ -305,6 +325,7 @@ window.RunScreen = (function () {
   function activateFallback(reason) {
     if (!S) return;
     S.fallbackActive = true;
+    showMainCanvas(true); // demo background is drawn on the main canvas
     S.statusMsg = reason || 'Video unavailable or embedding disabled';
     updateStatus();
     if (window.Notify) {
@@ -325,13 +346,13 @@ window.RunScreen = (function () {
     S.firstFrameReceived = false;
     S.fallbackActive = false;
     S.frameCount = 0;
-    S.frameTimes = [];
+    S.videoBuffering = false;
     S.fps = 0;
+    showMainCanvas(true); // loading placeholder until the iframe reports its first frame
 
     createHiddenIframe();
     startFallbackTimer();
 
-    const origin = encodeURIComponent(window.location.origin);
     const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&playsinline=1&rel=0&modestbranding=1&enablejsapi=1`;
     S.ytIframe.src = embedUrl;
 
@@ -344,62 +365,65 @@ window.RunScreen = (function () {
 
   /* --------------------------------------------------------------------------
      CROSS-ORIGIN POSTMESSAGE PROTOCOL (Iframe <-> Page)
-     Validates e.origin is https://www.youtube.com or https://www.youtube-nocookie.com
+     Only light messages come from the iframe now (no frames):
+       yt-ready, yt-first-frame, yt-stats, yt-buffering, yt-error, yt-snapshot-result
+     Messages are accepted only from our own iframe window.
      -------------------------------------------------------------------------- */
-  function onWindowMessage(e) {
-    const isYtOrigin = e.origin === 'https://www.youtube.com' || e.origin === 'https://www.youtube-nocookie.com';
-    //const isDevOrigin = (isDevModeActive() && e.origin === window.location.origin);
+  function postToIframe(msg) {
+    try {
+      if (S && S.ytIframe && S.ytIframe.contentWindow) {
+        S.ytIframe.contentWindow.postMessage(msg, '*');
+        return true;
+      }
+    } catch (err) {}
+    return false;
+  }
 
-    //if (!isYtOrigin)return; //&& !isDevOrigin) return;
+  function onWindowMessage(e) {
+    if (!S || !S.ytIframe || e.source !== S.ytIframe.contentWindow) return;
     const data = e.data;
     if (!data || typeof data !== 'object') return;
-    if (!S) return;
 
     switch (data.type) {
       case 'yt-ready': {
         S.ytReady = true;
-        // On 'yt-ready', immediately send {type:'yt-config', rate:<current rate>, fps:15, width:480}
         const initialRate = S.isIdle ? 0 : (S.rate || 1.0);
-        try {
-          if (S.ytIframe && S.ytIframe.contentWindow) {
-            S.ytIframe.contentWindow.postMessage({
-              type: 'yt-config',
-              rate: initialRate,
-              fps: 15,
-              width: 1080
-            }, '*');
-            S.lastSentRate = initialRate;
-            S.lastPostTime = performance.now();
-          }
-        } catch (err) {}
+        if (postToIframe({ type: 'yt-config', rate: initialRate, fps: CFG.DRAW_FPS })) {
+          S.lastSentRate = initialRate;
+          S.lastPostTime = performance.now();
+        }
         break;
       }
 
-  case 'yt-frame': {
-    //console.log('frame');
+      case 'yt-first-frame': {
+        if (S.loadTimeoutId) { clearTimeout(S.loadTimeoutId); S.loadTimeoutId = null; }
+        S.firstFrameReceived = true;
+        S.fallbackActive = false;
+        if (!S.forceDemo) showMainCanvas(false); // iframe canvas is now the background
+        updateStatus();
+        break;
+      }
 
-  if (S.loadTimeoutId) { clearTimeout(S.loadTimeoutId); S.loadTimeoutId = null; }
+      case 'yt-stats': {
+        S.fps = data.fps || 0;
+        S.videoBuffering = !!data.buffering;
+        S.frameCount += S.fps;
+        break;
+      }
 
-  const frame = data.frame;               // VideoFrame sent by the injected script
-  if (!frame) break;                      // ignore messages without a frame
-//console.log('frame');
-  S.firstFrameReceived = true;
-  S.fallbackActive = false;
+      case 'yt-buffering': {
+        S.videoBuffering = !!data.value;
+        updateStatus();
+        break;
+      }
 
-  const now = performance.now();
-  S.frameTimes.push(now);
-  while (S.frameTimes.length && S.frameTimes[0] < now - 1000) S.frameTimes.shift();
-  S.fps = S.frameTimes.length;
-
-  // Close the previous frame, otherwise the decoder runs out of buffers and playback stalls
-  if (S.currentBitmap && S.currentBitmap !== frame) {
-    try { S.currentBitmap.close(); } catch (err) {}
-  }
-  S.currentBitmap = frame;
-  S.frameCount++;
-  S.lastFrameAt = now;
-  break;
-}
+      case 'yt-snapshot-result': {
+        if (S.snapshotResolve) {
+          S.snapshotResolve(data.dataUrl || null);
+          S.snapshotResolve = null;
+        }
+        break;
+      }
 
       case 'yt-error': {
         console.warn('[YT Run] YouTube iframe error:', data.msg);
@@ -414,16 +438,6 @@ window.RunScreen = (function () {
   /* --------------------------------------------------------------------------
      FRAME RENDERING ON CANVAS
      -------------------------------------------------------------------------- */
-function drawCoverBitmap(frame) {
-  if (!frame) return;
-  const bw = frame.displayWidth;
-  const bh = frame.displayHeight;
-  if (!bw || !bh) return;
-  const s = Math.max(CANVAS_W / bw, CANVAS_H / bh);
-  const w = bw * s, h = bh * s;
-  ctx.drawImage(frame, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
-}
-
   function drawLoadingPlaceholder() {
     ctx.fillStyle = '#05070c';
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -483,11 +497,12 @@ function drawCoverBitmap(frame) {
         S.isIdle = true;
         S.cadence = 0;
         S.speedTarget = 0;
+        S.overspeed = false;
         sendRateToIframe(0, true); // Send rate 0 (pause video) immediately
+        updateStatus();
       }
     }
-
-    // 2) Smooth runner speed interpolation for statistics
+// 2) Smooth runner speed interpolation for statistics
     const targetSpeed = S.isIdle ? 0 : S.speedTarget;
     S.speed += (targetSpeed - S.speed) * Math.min(1, dt * 3.2);
     if (targetSpeed === 0 && S.speed < 0.25) S.speed = 0;
@@ -517,12 +532,12 @@ function drawCoverBitmap(frame) {
       if (S.videoTime >= S.total) finishRun();
     }
 
-    // 3) Draw canvas background
-    if (S.currentBitmap && !S.fallbackActive) {
-      drawCoverBitmap(S.currentBitmap);
-    } else if (S.fallbackActive) {
+    // 3) Draw main canvas (loading / fallback only)
+    // Once the iframe reports its first frame, its own canvas is the background
+    // and the main canvas is hidden: nothing to draw here.
+    if (S.fallbackActive || S.forceDemo) {
       drawDemo(dt);
-    } else {
+    } else if (!S.firstFrameReceived) {
       drawLoadingPlaceholder();
     }
   }
@@ -552,9 +567,12 @@ function drawCoverBitmap(frame) {
       if (S.fallbackActive) {
         R.dbgStatus.className = 'run-debug-status-tag run-status-fallback';
         R.dbgStatus.textContent = 'FALLBACK';
-      } else if (!S.firstFrameReceived) {
+      } else if (!S.firstFrameReceived || S.videoBuffering) {
         R.dbgStatus.className = 'run-debug-status-tag run-status-loading';
         R.dbgStatus.textContent = 'BUFFERING';
+      } else if (S.overspeed) {
+        R.dbgStatus.className = 'run-debug-status-tag run-status-fallback';
+        R.dbgStatus.textContent = 'TOO FAST';
       } else if (S.isIdle) {
         R.dbgStatus.className = 'run-debug-status-tag run-status-idle';
         R.dbgStatus.textContent = 'IDLE (PAUSED)';
@@ -567,13 +585,16 @@ function drawCoverBitmap(frame) {
 
   function updateStatus() {
     if (!R.status || !S) return;
-    const waiting = !S.firstFrameReceived && !S.fallbackActive;
-    const msg = S.statusMsg || (waiting ? t('run_buffering') : '');
+    const waiting = (!S.firstFrameReceived && !S.fallbackActive) || (S.videoBuffering && !S.isIdle);
+    let msg = S.statusMsg || (waiting ? t('run_buffering') : '');
+    // persistent "slow down" while the cadence stays above the safe limit
+    if (S.overspeed && !S.isIdle) msg = tt('run_slow_down', 'Slow down') + ' !';
     if (msg !== S.statusShown) {
       S.statusShown = msg;
       R.status.textContent = msg;
       R.status.style.opacity = msg ? '1' : '0';
     }
+    R.status.classList.toggle('run-status-warn', !!(S.overspeed && !S.isIdle));
   }
 
   function tick() {
@@ -593,7 +614,9 @@ function drawCoverBitmap(frame) {
     if (S.tickCount % 2 === 0 && window.Bridge && window.Bridge.isAvailable()) {
       window.Bridge.onRunBuffer({
         size: S.frameCount,
-        max: CFG.MAX_BUFFER_FRAMES,
+        max: 0,
+        buffering: !!S.videoBuffering,
+        overspeed: !!S.overspeed,
         rate: +(S.isIdle ? 0 : S.rate).toFixed(2),
         fps: S.fps,
         speed: +S.speed.toFixed(1)
@@ -602,7 +625,7 @@ function drawCoverBitmap(frame) {
   }
 
   /* --------------------------------------------------------------------------
-     DEV MODE: STEP SIMULATOR & MOCK VIDEO STREAM (when ?dev=1 or desktop)
+     DEV MODE: STEP SIMULATOR & DEMO BACKGROUND (when ?dev=1 or desktop)
      -------------------------------------------------------------------------- */
   function isDevModeActive() {
     return (typeof window.Android === 'undefined') ||
@@ -611,10 +634,6 @@ function drawCoverBitmap(frame) {
   }
 
   let simIntervalId = null;
-  let mockStreamIntervalId = null;
-  let mockOffscreenCanvas = null;
-  let mockOffscreenCtx = null;
-  let mockStreamAngle = 0;
 
   function stopStepSimulation() {
     if (simIntervalId) {
@@ -636,77 +655,20 @@ function drawCoverBitmap(frame) {
     }, intervalMs);
   }
 
-  // Desktop standalone test feed (generates and transfers ImageBitmaps via postMessage)
+  // Dev toggle: force the procedural demo background on the main canvas
+  // (the iframe is hidden behind it). Useful to test without any video.
   function toggleMockVideoStream() {
-    if (mockStreamIntervalId) {
-      clearInterval(mockStreamIntervalId);
-      mockStreamIntervalId = null;
-      if (R.devBtnMockFeed) {
-        R.devBtnMockFeed.classList.remove('active');
-        R.devBtnMockFeed.textContent = 'Mock Stream: OFF';
-      }
-      return;
+    if (!S) return;
+    S.forceDemo = !S.forceDemo;
+    if (S.forceDemo) {
+      showMainCanvas(true);
+    } else if (S.firstFrameReceived && !S.fallbackActive) {
+      showMainCanvas(false);
     }
-
-    if (!mockOffscreenCanvas) {
-      mockOffscreenCanvas = document.createElement('canvas');
-      mockOffscreenCanvas.width = 480;
-      mockOffscreenCanvas.height = 270;
-      mockOffscreenCtx = mockOffscreenCanvas.getContext('2d');
-    }
-
     if (R.devBtnMockFeed) {
-      R.devBtnMockFeed.classList.add('active');
-      R.devBtnMockFeed.textContent = 'Mock Stream: ON';
+      R.devBtnMockFeed.classList.toggle('active', S.forceDemo);
+      R.devBtnMockFeed.textContent = S.forceDemo ? 'Demo BG: ON' : 'Demo BG: OFF';
     }
-
-    mockStreamIntervalId = setInterval(async () => {
-      if (!S || S.finished) return;
-      const rate = S.isIdle ? 0 : S.rate;
-      mockStreamAngle += 0.05 * (rate || 0.1);
-
-      // Render colorful simulated trail footage on offscreen canvas
-      const w = 480;
-      const h = 270;
-      const g = mockOffscreenCtx.createLinearGradient(0, 0, w, h);
-      g.addColorStop(0, '#00172d');
-      g.addColorStop(0.5, '#0b3c5d');
-      g.addColorStop(1, '#1d2731');
-      mockOffscreenCtx.fillStyle = g;
-      mockOffscreenCtx.fillRect(0, 0, w, h);
-
-      // Procedural road perspective lines
-      mockOffscreenCtx.strokeStyle = '#00e5ff';
-      mockOffscreenCtx.lineWidth = 3;
-      mockOffscreenCtx.beginPath();
-      mockOffscreenCtx.moveTo(w / 2, h * 0.45);
-      mockOffscreenCtx.lineTo(w * 0.1, h);
-      mockOffscreenCtx.moveTo(w / 2, h * 0.45);
-      mockOffscreenCtx.lineTo(w * 0.9, h);
-      mockOffscreenCtx.stroke();
-
-      // Moving road dashes
-      const dashY = ((mockStreamAngle * 120) % (h * 0.55)) + (h * 0.45);
-      mockOffscreenCtx.fillStyle = '#ffffff';
-      mockOffscreenCtx.fillRect(w / 2 - 4, dashY, 8, 22);
-
-      // Watermark
-      mockOffscreenCtx.fillStyle = '#00e5ff';
-      mockOffscreenCtx.font = '700 14px monospace';
-      mockOffscreenCtx.fillText(`[MOCK YT STREAM] SPEED: ${rate.toFixed(2)}x`, 16, 28);
-
-      try {
-        const bmp = await createImageBitmap(mockOffscreenCanvas);
-        // Post frame to messageHandler matching the exact injected script contract
-        window.postMessage({
-          type: 'yt-frame',
-          bmp,
-          t: performance.now() / 1000,
-          w,
-          h
-        }, window.location.origin, [bmp]);
-      } catch (err) {}
-    }, 1000 / 15);
   }
 
   function setupDevPanel(container) {
@@ -734,7 +696,7 @@ function drawCoverBitmap(frame) {
           <input type="text" class="run-dev-input focusable" id="dev-yt-input" placeholder="YouTube URL or Video ID" />
           <button type="button" class="run-dev-btn focusable" id="dev-btn-load-yt">Load Video</button>
         </div>
-        <button type="button" class="run-dev-btn focusable" id="dev-btn-mock-feed">Mock Stream: OFF</button>
+        <button type="button" class="run-dev-btn focusable" id="dev-btn-mock-feed">Demo BG: OFF</button>
         <button type="button" class="run-dev-btn focusable" id="dev-btn-cap-frame">Save Frame PNG</button>
       </div>
     `;
@@ -826,10 +788,6 @@ function drawCoverBitmap(frame) {
     if (!S || S.finished) return;
     S.finished = true;
     stopStepSimulation();
-    if (mockStreamIntervalId) {
-      clearInterval(mockStreamIntervalId);
-      mockStreamIntervalId = null;
-    }
     sendRateToIframe(0, true);
     finalize();
     buildSummary();
@@ -907,9 +865,12 @@ function drawCoverBitmap(frame) {
       pendingRate: null,
       throttleTimer: null,
       videoTime: 0,
-      currentBitmap: null,
       frameCount: 0,
-      frameTimes: [],
+      videoBuffering: false,
+      overspeed: false,
+      lastOverspeedWarn: 0,
+      forceDemo: false,
+      snapshotResolve: null,
       fps: 0,
       ytIframe: null,
       ytReady: false,
@@ -928,8 +889,7 @@ function drawCoverBitmap(frame) {
       allowExit: false,
       hydrateTimer: null
     };
-
-    container.innerHTML = `
+container.innerHTML = `
       <div class="run-top">
         <div class="run-title-block">
           <button type="button" class="back-btn focusable" id="run-end-btn" tabindex="0">
@@ -1156,11 +1116,6 @@ ctx.imageSmoothingQuality = 'high';
     finalize();
     stopStepSimulation();
 
-    if (mockStreamIntervalId) {
-      clearInterval(mockStreamIntervalId);
-      mockStreamIntervalId = null;
-    }
-
     if (rafId) cancelAnimationFrame(rafId);
     if (tickId) clearInterval(tickId);
     rafId = tickId = null;
@@ -1169,11 +1124,6 @@ ctx.imageSmoothingQuality = 'high';
       clearTimeout(S.hydrateTimer);
       clearTimeout(S.loadTimeoutId);
       clearTimeout(S.throttleTimer);
-
-      if (S.currentBitmap && typeof S.currentBitmap.close === 'function') {
-        try { S.currentBitmap.close(); } catch (e) {}
-        S.currentBitmap = null;
-      }
 
       // Teardown YouTube iframe
       if (S.ytIframe) {
@@ -1186,8 +1136,6 @@ ctx.imageSmoothingQuality = 'high';
         S.ytIframe = null;
       }
     }
-
-    clearFrameBuffer();
 
     if (keyHandler) window.removeEventListener('keydown', keyHandler);
     if (nativeHandler) window.removeEventListener('matpad:nativeEvent', nativeHandler);
@@ -1221,27 +1169,32 @@ ctx.imageSmoothingQuality = 'high';
     onStep(optionalArg);
   };
 
-  // Expose Frame Buffer inspection and PNG capture
-  window.getBufferedFrames = function () {
-    return ringBuffer;
-  };
+  // PNG capture: the frame lives in the iframe canvas, so ask the iframe for a data URL.
+  function saveDataUrl(dataUrl, filename) {
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { if (a.parentNode) a.parentNode.removeChild(a); }, 1000);
+  }
 
   window.downloadCurrentFrame = function (filename = 'matpad-run-frame.png') {
-    if (!canvas) return;
     try {
-      canvas.toBlob((blob) => {
-        if (!blob) return;
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          if (a.parentNode) a.parentNode.removeChild(a);
-          URL.revokeObjectURL(url);
-        }, 1000);
-      }, 'image/png');
+      // main canvas visible (fallback / demo / loading) -> capture it directly
+      if (canvas && canvas.style.display !== 'none') {
+        saveDataUrl(canvas.toDataURL('image/png'), filename);
+        return;
+      }
+      if (!S) return;
+      new Promise((resolve) => {
+        S.snapshotResolve = resolve;
+        if (!postToIframe({ type: 'yt-snapshot' })) resolve(null);
+        setTimeout(() => resolve(null), 2000);
+      }).then((dataUrl) => {
+        if (dataUrl) saveDataUrl(dataUrl, filename);
+        else console.warn('[YT Run] snapshot unavailable');
+      });
     } catch (e) {
       console.warn('[YT Run] downloadCurrentFrame failed:', e);
     }
